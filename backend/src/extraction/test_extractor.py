@@ -138,3 +138,62 @@ def test_unsupported_type_raises():
         pass
     finally:
         os.unlink(tmp)
+
+# ── performance + robustness ──────────────────────────────────────────────────
+
+def test_extraction_under_2_seconds():
+    """Performance baseline: extraction should remain fast."""
+    import time
+    start = time.time()
+    extract(NDA_V1)
+    elapsed = time.time() - start
+    assert elapsed < 2.0, f"Extraction too slow: {elapsed:.2f}s"
+
+
+def test_detects_nested_subclauses():
+    """Ensure nested legal numbering patterns are preserved."""
+    text = """
+    5(a)(i) Confidential Information
+    Some text here.
+
+    5(a)(ii) Exclusions
+    More text here.
+
+    5(b) Return of Materials
+    Final text.
+    """
+    headings = _extract_headings(text)
+    numbers = [h['number'] for h in headings]
+
+    assert '5(a)(i)' in numbers
+    assert '5(a)(ii)' in numbers
+    assert '5(b)' in numbers
+
+
+def test_normalization_stable():
+    """Whitespace normalization should be deterministic."""
+    raw = "Clause   1\n\n\n\nText"
+    clean = _strip_noise(raw)
+
+    assert '\n\n\n' not in clean
+    assert 'Clause 1' in clean
+    assert 'Text' in clean
+
+
+def test_heading_order_integrity():
+    """Headings must remain in original document order."""
+    text = """
+    1. Definitions
+    Some text.
+
+    3. Liability
+    More text.
+
+    2. Confidentiality
+    Earlier-numbered clause appearing later intentionally.
+    """
+
+    headings = _extract_headings(text)
+    offsets = [h['char_offset'] for h in headings]
+
+    assert offsets == sorted(offsets)
