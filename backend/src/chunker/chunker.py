@@ -19,6 +19,7 @@ _BOUNDARY_PATTERNS = [
     re.compile(r'^[ \t]*(\d+\.\d+)\.?\s+([A-Z][^\n]{0,200})$', re.MULTILINE),   # decimal sub
     re.compile(r'^[ \t]*(\d+)\.?\s+([A-Z][^\n]{0,200})$', re.MULTILINE),         # integer
     re.compile(r'^[ \t]*([A-Z]{4,}(?:\s+[A-Z]+){0,6})\s*$', re.MULTILINE),      # UPPERCASE
+    re.compile(r'^[ \t]*(Article\s+[IVXLC]+)\.?\s+([A-Z][^\n]{2,100})$', re.MULTILINE),  # Roman numeral
     re.compile(r'^[ \t]*(SCHEDULE\s+[A-Z0-9]+|ANNEXURE\s+[A-Z0-9]+)\s*$', re.MULTILINE),
 ]
 
