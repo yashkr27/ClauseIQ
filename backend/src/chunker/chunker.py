@@ -119,15 +119,20 @@ def _find_boundaries(text: str) -> list[dict]:
             groups = m.groups()
             if len(groups) == 2:
                 raw_num, title = groups
+                # Numbered heading: body starts at the title text (same line as number)
+                # e.g. "1. DEFINITIONS. The term..." → body starts at "DEFINITIONS..."
+                end_heading = m.start(2)
             else:
                 raw_num, title = '', groups[0]
-            newline_pos = text.find('\n', m.start())
+                # UPPERCASE / SCHEDULE headings are standalone lines → body starts next line
+                newline_pos = text.find('\n', m.start())
+                end_heading = newline_pos + 1 if newline_pos != -1 else m.end()
             boundaries.append({
                 'raw_number':    raw_num.strip(),
                 'number':        _normalise_number(raw_num.strip()) if raw_num.strip() else '',
                 'title':         title.strip(),
                 'start':         m.start(),
-                'end_of_heading': newline_pos + 1 if newline_pos != -1 else m.end(),
+                'end_of_heading': end_heading,
             })
 
     boundaries.sort(key=lambda b: b['start'])
