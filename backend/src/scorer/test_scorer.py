@@ -8,7 +8,7 @@ import json
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from src.scorer.scorer import _check_constraints, _score_level, compute_risk_delta
+from src.scorer.scorer import _check_constraints, _score_level, compute_risk_delta, _normalise_numeric_text
 from src.scorer.knowledge import load_knowledge_nodes
 from src.models.schemas import Clause, ClauseType, RiskScore, ComparisonResult, MatchType
 
@@ -69,6 +69,25 @@ def test_c014_short_notice():
     c = _clause('9', 'Termination', 'Either party may terminate with 30 days written notice.')
     _, violations = _check_constraints(c, [])
     assert 'C-014' in violations, "C-014 must fire when termination notice < 90 days"
+
+
+# ── Fix 3 — word-number normalisation for C-011 ──────────────────────────────
+
+def test_normalise_numeric_text():
+    assert '2' in _normalise_numeric_text('two years')
+    assert '1' in _normalise_numeric_text('one year')
+    assert '24' in _normalise_numeric_text('twenty-four months')
+
+def test_c011_word_numbers_two_years():
+    c = _clause('3', 'Standstill', 'The employee agrees to a standstill period of two years.')
+    min_score, violations = _check_constraints(c, [])
+    assert 'C-011' in violations, "C-011 must fire on 'two years' (word numbers)"
+    assert min_score >= 7
+
+def test_c011_standstill_keyword():
+    c = _clause('3', 'Standstill', 'The parties agree to a standstill for 18 months from the effective date.')
+    _, violations = _check_constraints(c, [])
+    assert 'C-011' in violations, "C-011 must fire on 'standstill' keyword"
 
 
 # ── SB1 — knowledge nodes load ────────────────────────────────────────────────

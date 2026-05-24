@@ -48,8 +48,8 @@ def _get_model_name(client) -> str:
     """
     Returns the Amazon Bedrock Claude model ID / Inference Profile ARN.
     """
-    model_id = os.environ["AWS_BEDROCK_MODEL_ID"].strip()
-    return model_id
+    val = os.getenv("AWS_BEDROCK_MODEL_ID") or os.getenv("MODEL_NAME") or "arn:aws:bedrock:ap-southeast-2:593106394881:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    return val.strip()
 
 
 class BedrockResponseContent:
@@ -105,6 +105,23 @@ def _call_llm(client, model_name: str, prompt: str, hashed_user: str) -> Bedrock
         return BedrockResponse(fallback_json)
 
 
+# ── word-number normalisation for constraint checks (Fix 3) ──────────────────
+
+_WORD_NUMS = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'eleven': 11, 'twelve': 12, 'eighteen': 18, 'twenty': 20,
+    'twenty-four': 24, 'twenty four': 24,
+}
+
+def _normalise_numeric_text(text: str) -> str:
+    """Replace written numbers before time-units so regex finds them."""
+    result = text
+    # Process multi-word keys first (e.g. 'twenty-four' before 'twenty' and 'four')
+    for word, val in sorted(_WORD_NUMS.items(), key=lambda x: -len(x[0])):
+        result = re.sub(rf'\b{re.escape(word)}\b', str(val), result, flags=re.IGNORECASE)
+    return result
+
 # ── CONSTRAINT override rules (S2) ────────────────────────────────────────────
 # Logic lives in Python, NOT in the LLM prompt.
 # Each entry: (constraint_id, check_function, minimum_score)
@@ -125,10 +142,13 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
             violations.append('C-010')
             min_score = max(min_score, 8)
 
-    # C-011: non-compete / non-solicitation > 12 months
-    if any(w in text for w in ['non-compete', 'non-solicitation', 'noncompete', 'nonsolicitation']):
-        months = re.findall(r'(\d+)\s*month', text)
-        years  = re.findall(r'(\d+)\s*year', text)
+    # C-011: non-compete / non-solicitation / standstill > 12 months
+    if any(w in text for w in ['non-compete', 'non-solicitation', 'noncompete',
+                                'nonsolicitation', 'standstill', 'stand-still',
+                                'non-solicit']):
+        norm = _normalise_numeric_text(text)
+        months = re.findall(r'(\d+)\s*month', norm)
+        years  = re.findall(r'(\d+)\s*year', norm)
         duration_months = max([int(m) for m in months], default=0)
         duration_months = max(duration_months, max([int(y)*12 for y in years], default=0))
         if duration_months > 12:
@@ -142,7 +162,8 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
             min_score = max(min_score, 7)
 
     # C-013: no arbitration in dispute/governing law clause
-    if any(w in title for w in ['dispute', 'governing', 'jurisdiction', 'resolution', 'law']):
+    if any(w in title for w in ['dispute', 'governing', 'jurisdiction', 'resolution', 'law']) \
+       or any(w in text[:300] for w in ['governing law', 'jurisdiction', 'venue', 'courts of']):
         if 'arbitration' not in text and 'arbitrate' not in text:
             violations.append('C-013')
             min_score = max(min_score, 6)

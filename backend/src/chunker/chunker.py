@@ -63,6 +63,43 @@ def _detect_type(title: str, text_sample: str) -> ClauseType:
     return ClauseType.general
 
 
+# ── garbage detection (Fix 2) ─────────────────────────────────────────────────
+
+def _is_garbage(c: dict) -> bool:
+    """Returns True if the chunk is a non-clause artifact (address, signature, boilerplate)."""
+    num = c.get('number', '')
+    title = c.get('title', '').strip()
+    text = c.get('text', '').strip()
+    # Address number (4+ digit street number like "1530 Shields Drive")
+    if re.match(r'^\d{4,}$', num):
+        return True
+    # Too short to be a real clause
+    if len(text) < 80:
+        return True
+    # Signature / boilerplate titles
+    if title.upper() in ('TITLE', 'NAME', 'BY', 'DATE', 'SIGNATURE'):
+        return True
+    # Title is just a single generic word (short uppercase)
+    if len(title.split()) == 1 and title.isupper() and len(title) < 5:
+        return True
+    return False
+
+
+# ── title cleanup (Fix 1) ─────────────────────────────────────────────────────
+
+def _clean_title(number: str, raw_title: str) -> str:
+    """Return a short heading; fall back to 'Clause N' when the raw title is body text."""
+    t = raw_title.strip()
+    # Real heading: short, no trailing comma/conjunction, not a sentence
+    if len(t) <= 60 and not t.endswith((',', ' and', ' or', ' to', ' the')):
+        return t
+    # Fallback: use clause number label
+    if number:
+        return f"Clause {number}"
+    words = t.split()[:5]
+    return ' '.join(words) + ('…' if len(t.split()) > 5 else '')
+
+
 # ── boundary finding ──────────────────────────────────────────────────────────
 
 def _find_boundaries(text: str) -> list[dict]:
@@ -83,12 +120,13 @@ def _find_boundaries(text: str) -> list[dict]:
                 raw_num, title = groups
             else:
                 raw_num, title = '', groups[0]
+            newline_pos = text.find('\n', m.start())
             boundaries.append({
                 'raw_number':    raw_num.strip(),
                 'number':        _normalise_number(raw_num.strip()) if raw_num.strip() else '',
                 'title':         title.strip(),
                 'start':         m.start(),
-                'end_of_heading': m.end(),
+                'end_of_heading': newline_pos + 1 if newline_pos != -1 else m.end(),
             })
 
     boundaries.sort(key=lambda b: b['start'])
@@ -166,12 +204,15 @@ def chunk(extraction: ExtractionResult) -> list[Clause]:
         body  = text[start:end].strip()
         raw_chunks.append({
             'number': b['number'],
-            'title':  b['title'],
+            'title':  _clean_title(b['number'], b['title']),
             'text':   body,
         })
 
     # Group sub-clauses under parents (C3)
     grouped = _group_sub_clauses(raw_chunks)
+
+    # Filter garbage chunks (Fix 2): addresses, signatures, boilerplate
+    grouped = [c for c in grouped if not _is_garbage(c)]
 
     # Build Clause objects with type tagging (C4)
     clauses = []
