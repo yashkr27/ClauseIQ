@@ -34,6 +34,7 @@ class RiskScore(BaseModel):
     risk_factors: list[str]
     constraint_violations: list[str]
     recommendation: str
+    source: Optional[str] = "llm"      # Explainability tag: deterministic | llm | hybrid | cache
 
 class ComparisonResult(BaseModel):
     match_type: MatchType

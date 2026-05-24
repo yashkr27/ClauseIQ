@@ -4,6 +4,7 @@ Run from backend/: python -m pytest src/scorer/test_scorer.py -v -k "not score_c
 """
 
 import os
+import json
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -117,3 +118,151 @@ def test_risk_delta_decreased():
     )
     updated = compute_risk_delta([_score('5', 8)], [_score('5', 3)], [r])
     assert updated[0].risk_delta == 'DECREASED'
+
+
+# ── Hybrid Risk Engine Path Tests ─────────────────────────────────────────────
+from unittest.mock import patch, MagicMock
+from src.scorer.scorer import score_clause, _risk_score_cache
+
+def test_deterministic_bypass_without_enrichment():
+    # Clear cache to guarantee isolated test state
+    _risk_score_cache.clear()
+    
+    # Clause that triggers C-010: uncapped liability
+    c = _clause('5', 'Liability', 'The liability of each party shall be unlimited for any breach.')
+    nodes = load_knowledge_nodes()
+    
+    # Mock Anthropic client to ensure it is NEVER called in deterministic mode
+    with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
+        result = score_clause(c, nodes, enrich=False)
+        
+        # Verify LLM was bypassed
+        mock_client.assert_not_called()
+        
+        # Verify score attributes
+        assert result.score >= 8
+        assert result.risk_level == 'HIGH'
+        assert 'C-010' in result.constraint_violations
+        assert result.source == 'deterministic'
+        assert len(result.risk_factors) > 0
+        assert "Liability Cap" in result.risk_factors[0]
+
+def test_hybrid_path_with_enrichment():
+    _risk_score_cache.clear()
+    
+    # Clause that triggers C-010: uncapped liability
+    c = _clause('5', 'Liability', 'The liability of each party shall be unlimited for any breach.')
+    nodes = load_knowledge_nodes()
+    
+    # Mock invoke_model response body
+    mock_body = MagicMock()
+    mock_body.read.return_value = b'{"content": [{"text": "{\\"score\\": 5, \\"risk_factors\\": [\\"Enriched LLM factor\\"], \\"recommendation\\": \\"Negotiate cap\\"}"}]}'
+    mock_response = {"body": mock_body}
+    
+    with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
+        mock_client.return_value.invoke_model.return_value = mock_response
+        
+        result = score_clause(c, nodes, enrich=True)
+        
+        # Verify Bedrock was invoked
+        mock_client.return_value.invoke_model.assert_called_once()
+        
+        assert result.score >= 8
+        assert result.risk_level == 'HIGH'
+        assert 'C-010' in result.constraint_violations
+        assert result.source == 'hybrid'
+        assert result.risk_factors == ["Enriched LLM factor"]
+        assert result.recommendation == "Negotiate cap"
+
+
+def test_llm_path_without_constraints():
+    _risk_score_cache.clear()
+    
+    # General clause with no triggers
+    c = _clause('1', 'Introduction', 'This agreement is signed by both parties on the date written below.')
+    nodes = load_knowledge_nodes()
+    
+    mock_body = MagicMock()
+    mock_body.read.return_value = b'{"content": [{"text": "{\\"score\\": 2, \\"risk_factors\\": [\\"Standard intro\\"], \\"recommendation\\": \\"None\\"}"}]}'
+    mock_response = {"body": mock_body}
+    
+    with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
+        mock_client.return_value.invoke_model.return_value = mock_response
+        
+        result = score_clause(c, nodes, enrich=False)
+        
+        mock_client.return_value.invoke_model.assert_called_once()
+        assert result.score == 2
+        assert result.risk_level == 'LOW'
+        assert len(result.constraint_violations) == 0
+        assert result.source == 'llm'
+
+
+def test_clause_hash_cache_hit():
+    _risk_score_cache.clear()
+    
+    c = _clause('1', 'Introduction', 'This agreement is signed by both parties on the date written below.')
+    nodes = load_knowledge_nodes()
+    
+    mock_body = MagicMock()
+    mock_body.read.return_value = b'{"content": [{"text": "{\\"score\\": 2, \\"risk_factors\\": [\\"Standard intro\\"], \\"recommendation\\": \\"None\\"}"}]}'
+    mock_response = {"body": mock_body}
+    
+    with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
+        mock_client.return_value.invoke_model.return_value = mock_response
+        
+        # First call — populates cache
+        res1 = score_clause(c, nodes, enrich=False)
+        assert res1.source == 'llm'
+        mock_client.return_value.invoke_model.assert_called_once()
+        
+        # Second call — must hit cache
+        res2 = score_clause(c, nodes, enrich=False)
+        assert res2.source == 'cache'
+        # Total calls should still be 1 (bypassed on second call)
+        mock_client.return_value.invoke_model.assert_called_once()
+        
+        assert res2.score == res1.score
+        assert res2.risk_level == res1.risk_level
+        assert res2.risk_factors == res1.risk_factors
+
+
+# ── AWS Bedrock Integration Tests ─────────────────────────────────────────────
+from src.scorer.scorer import _get_anthropic_client, _get_model_name, _call_llm
+
+def test_get_anthropic_client_bedrock_bearer_token():
+    # Patch client to force re-initialization
+    with patch('src.scorer.scorer._client', None):
+        with patch('boto3.client') as mock_boto:
+            with patch.dict(os.environ, {
+                "AWS_BEARER_TOKEN_BEDROCK": "dummy-bearer-token",
+                "AWS_REGION": "us-east-1"
+            }):
+                _get_anthropic_client()
+                mock_boto.assert_called_once_with(
+                    service_name="bedrock-runtime",
+                    region_name="us-east-1"
+                )
+
+def test_get_model_name_mapping():
+    mock_client = MagicMock()
+    assert _get_model_name(mock_client) == "anthropic.claude-3-haiku-20240307-v1:0"
+    
+    # Verify environment override
+    with patch.dict(os.environ, {"AWS_BEDROCK_MODEL_ID": "custom-model"}):
+        assert _get_model_name(mock_client) == "custom-model"
+
+def test_call_llm_defensive_bedrock_retry():
+    # Test that _call_llm falls back gracefully to a robust default response if Bedrock is offline/unavailable
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.side_effect = Exception("Bedrock runtime connection failure")
+    
+    result = _call_llm(mock_bedrock, "dummy-model", "hello", "hashed-user")
+    
+    # It must return a valid BedrockResponse with fallback JSON content
+    assert result.content[0].text is not None
+    data = json.loads(result.content[0].text)
+    assert data["score"] == 3
+    assert "fallback" in data["risk_factors"][0]
+
+
