@@ -75,7 +75,7 @@ def _is_garbage(c: dict) -> bool:
     if re.match(r'^\d{4,}$', num):
         return True
     # Too short to be a real clause
-    if len(text) < 80:
+    if len(text) < 150:
         return True
     # Signature / boilerplate titles
     if title.upper() in ('TITLE', 'NAME', 'BY', 'DATE', 'SIGNATURE'):

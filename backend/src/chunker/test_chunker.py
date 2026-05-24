@@ -29,8 +29,8 @@ def test_parent_of_top():            assert _parent_number('3') == ''
 # ── C1 — legal-aware splitting ────────────────────────────────────────────────
 
 def test_splits_on_numbered_headings():
-    text = ("1. Definitions\n\n" + "Definition clause body text that is long enough to pass the minimum length filter. " + "\n\n"
-            "2. Obligations\n\n" + "Obligation clause body text that is also long enough to pass the minimum length filter.")
+    text = ("1. Definitions\n\n" + "Definition clause body text that is long enough to pass the minimum length filter. " * 2 + "\n\n"
+            "2. Obligations\n\n" + "Obligation clause body text that is also long enough to pass the minimum length filter. " * 2)
     clauses = chunk(_make_extraction(text))
     assert len(clauses) >= 2
 
@@ -41,8 +41,8 @@ def test_does_not_split_on_paragraph():
     assert len(clauses) == 1, "Paragraph breaks must NOT create new clauses (C1)"
 
 def test_splits_uppercase_title():
-    text = ("BACKGROUND\n\n" + "Background information text that is long enough to pass the garbage filter minimum. " + "\n\n"
-            "OPERATIVE TERMS\n\n" + "Operative terms body text that is also long enough to pass the garbage filter here.")
+    text = ("BACKGROUND\n\n" + "Background information text that is long enough to pass the garbage filter minimum. " * 2 + "\n\n"
+            "OPERATIVE TERMS\n\n" + "Operative terms body text that is also long enough to pass the garbage filter here. " * 2)
     clauses = chunk(_make_extraction(text))
     assert len(clauses) >= 2
 
@@ -120,7 +120,7 @@ def test_garbage_single_short_uppercase():
     assert _is_garbage({'number': '', 'title': 'ABC', 'text': 'a' * 100}) is True
 
 def test_not_garbage_real_clause():
-    assert _is_garbage({'number': '1', 'title': 'Definitions', 'text': 'a' * 100}) is False
+    assert _is_garbage({'number': '1', 'title': 'Definitions', 'text': 'a' * 200}) is False
 
 def test_garbage_filtered_in_pipeline():
     """Street address chunks should be removed from final output."""
