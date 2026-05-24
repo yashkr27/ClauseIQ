@@ -1,18 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from .routes.analyse import router as analyse_router
+from .routes.compare import router as compare_router
 
-app = FastAPI(title="ClauseIQ API", version="0.1.0")
+app = FastAPI(title="ClauseIQ API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # Allow flexible origin for dev environment
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Routers will be registered here as layers are built
-# from .routes import extract, chunk, compare, score
-# app.include_router(extract.router, prefix="/api")
+# Register routers
+app.include_router(analyse_router)
+app.include_router(compare_router)
 
 @app.get("/health")
 def health():

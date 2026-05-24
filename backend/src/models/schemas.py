@@ -45,3 +45,18 @@ class ComparisonResult(BaseModel):
     risk_delta: Optional[str]         # INCREASED | DECREASED | UNCHANGED | N/A
     score_v1: Optional[int]
     score_v2: Optional[int]
+
+class RiskSummary(BaseModel):
+    high:   int
+    medium: int
+    low:    int
+
+class AnalyseResponse(BaseModel):
+    filename:     str
+    clauses:      list[Clause]
+    risk_scores:  list[RiskScore]
+    risk_summary: RiskSummary
+
+class CompareResponse(BaseModel):
+    comparison: list[ComparisonResult]
+    net_delta:  str    # INCREASED | DECREASED | UNCHANGED (rule M3)
