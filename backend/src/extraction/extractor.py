@@ -66,11 +66,11 @@ def _strip_noise(text: str) -> str:
 
 _HEADING_PATTERNS = [
     # nested subclauses: "5(a)(i) Confidential Information" or "5(b) Return of Materials"
-    re.compile(r'^[ \t]*(\d+(?:\([a-zA-Z0-9]+\))+)\s+([A-Z][^\n]{2,60})$', re.MULTILINE),
+    re.compile(r'^[ \t]*(\d+(?:\([a-zA-Z0-9]+\))+)\s+([A-Z][^\n]{2,200})$', re.MULTILINE),
     # decimal: "3.1 Title" or "3.1. Title"
-    re.compile(r'^[ \t]*(\d+\.\d+)\.?\s+([A-Z][^\n]{2,60})$', re.MULTILINE),
+    re.compile(r'^[ \t]*(\d+\.\d+)\.?\s+([A-Z][^\n]{2,200})$', re.MULTILINE),
     # integer: "3. Title" or "3 Title" (at line start, followed by uppercase)
-    re.compile(r'^[ \t]*(\d+)\.?\s+([A-Z][^\n]{2,60})$', re.MULTILINE),
+    re.compile(r'^[ \t]*(\d+)\.?\s+([A-Z][^\n]{2,200})$', re.MULTILINE),
     # ALL CAPS section titles (min 4 chars, standalone line)
     re.compile(r'^[ \t]*([A-Z]{4,}(?:\s+[A-Z]+){0,5})$', re.MULTILINE),
     # Title Case section headings: 1–6 words, each capitalised, 4–50 chars total
