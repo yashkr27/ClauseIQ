@@ -34,7 +34,10 @@ async def analyse(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Extraction or analysis failed: {str(e)}")
     finally:
         if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
     summary = RiskSummary(
         high   = sum(1 for s in scores if s.risk_level == 'HIGH'),

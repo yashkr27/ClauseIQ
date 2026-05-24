@@ -3,6 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routes.analyse import router as analyse_router
 from .routes.compare import router as compare_router
 
+
+from dotenv import load_dotenv
+load_dotenv()
+
 app = FastAPI(title="ClauseIQ API", version="1.0.0")
 
 app.add_middleware(

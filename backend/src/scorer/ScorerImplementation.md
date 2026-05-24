@@ -104,7 +104,7 @@ Implemented:
 - **Optional Semantic Enrichment**: Supported via `enrich=True` parameter to execute a lightweight semantic LLM call to enrich the risk factors and recommendation while keeping the deterministic score override active. Returns `source="hybrid"`.
 - **Explainability Metadata**: Added a `source` tag to every `RiskScore` (`"deterministic" | "llm" | "hybrid" | "cache"`) for complete visibility and auditability.
 - **Security & Policy Compliance**: Passed hashed user tracking (`user_id`) in Anthropic client `metadata` to prevent security alerts and satisfy policy rules.
-- **Direct Amazon Bedrock Integration**: Completely removed direct `anthropic` SDK dependencies. Swapped with native `boto3` Bedrock Runtime client and Claude 3 Haiku payload (`anthropic.claude-3-haiku-20240307-v1:0`), fully resolving direct API key validation errors.
+- **Direct Amazon Bedrock Integration**: Completely removed direct `anthropic` SDK dependencies and legacy `invoke_model()` calls. Swapped with native `boto3` Bedrock Runtime client using the modern `converse()` API and the global Claude 4.5 Haiku Inference Profile ARN resolved via `AWS_BEDROCK_MODEL_ID`, fully resolving `AccessDeniedException` and direct API key validation errors.
 - **Graceful Fallback Handling**: Implemented a fallback exception handler within `_call_llm()` to return a pre-configured low-risk template JSON if Bedrock is offline/unavailable, ensuring zero pipeline crashes.
 - **Explainability & Compatibility**: Added a custom `BedrockResponse` adapter class to mimic the Anthropic Messages API return format, preserving the existing `deterministic → hybrid → llm` pipeline, caching, and `source` metadata.
 
@@ -116,7 +116,7 @@ Knowledge rules:
 - C-014
 
 Current status:
-- scorer tests passing with 19/19 unit tests asserting boto3 client resolutions, mock Bedrock direct invoke_model payload structures, cache hits, deterministic-first bypassing, and graceful offline fallback handling.
+- scorer tests passing with 19/19 unit tests asserting boto3 client resolutions, mock Bedrock `converse()` signature structures, cache hits, deterministic-first bypassing, and graceful offline fallback handling.
 
 ---
 

@@ -121,6 +121,7 @@ def _extract_pdf(file_path: str) -> tuple[str, int]:
     """
     import fitz  # PyMuPDF
 
+    doc = None
     try:
         doc = fitz.open(file_path)
         page_count = len(doc)
@@ -132,10 +133,17 @@ def _extract_pdf(file_path: str) -> tuple[str, int]:
         # If we got substantial text, use it directly (rule A5 bypass check: vector-drawn PDFs
         # return empty strings here, so they will correctly fall back to OCR).
         if len(doc_text) >= 100:
+            doc.close()
             return doc_text, page_count
     except Exception:
         # Gracefully handle any issues opening with PyMuPDF and fallback to OCR
         pass
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
 
     # OCR Fallback pipeline (rule A5)
     from pdf2image import convert_from_path

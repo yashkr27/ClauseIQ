@@ -31,13 +31,13 @@ def _get_anthropic_client():
         # Build boto3 client configuration dynamically
         kwargs = {
             "service_name": "bedrock-runtime",
-            "region_name": aws_region
+            "region_name": aws_region.strip() if aws_region else "us-east-1"
         }
         if aws_access_key and aws_secret_key:
-            kwargs["aws_access_key_id"] = aws_access_key
-            kwargs["aws_secret_access_key"] = aws_secret_key
+            kwargs["aws_access_key_id"] = aws_access_key.strip()
+            kwargs["aws_secret_access_key"] = aws_secret_key.strip()
             if aws_session_token:
-                kwargs["aws_session_token"] = aws_session_token
+                kwargs["aws_session_token"] = aws_session_token.strip()
                 
         # boto3 automatically picks up AWS_BEARER_TOKEN_BEDROCK when it's present in the environment
         _client = boto3.client(**kwargs)
@@ -46,9 +46,10 @@ def _get_anthropic_client():
 
 def _get_model_name(client) -> str:
     """
-    Returns the Amazon Bedrock Claude 3 Haiku model ID.
+    Returns the Amazon Bedrock Claude model ID / Inference Profile ARN.
     """
-    return os.getenv("AWS_BEDROCK_MODEL_ID") or "anthropic.claude-3-haiku-20240307-v1:0"
+    model_id = os.environ["AWS_BEDROCK_MODEL_ID"].strip()
+    return model_id
 
 
 class BedrockResponseContent:
@@ -63,35 +64,42 @@ class BedrockResponse:
 
 def _call_llm(client, model_name: str, prompt: str, hashed_user: str) -> BedrockResponse:
     """
-    Directly invokes Amazon Bedrock using boto3 runtime client and Claude 3 Messages payload.
+    Directly invokes Amazon Bedrock using boto3 runtime client converse() API.
     Features a graceful fallback if Bedrock is unavailable or fails.
     """
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 500,
-        "messages": [
+    try:
+        if not prompt.strip():
+            raise ValueError("Prompt cannot be empty")
+
+        messages = [
             {
                 "role": "user",
-                "content": prompt
+                "content": [
+                    {
+                        "text": prompt.strip()
+                    }
+                ]
             }
         ]
-    }
-    
-    try:
-        response = client.invoke_model(
+
+        response = client.converse(
             modelId=model_name,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(payload)
+            messages=messages,
+            inferenceConfig={
+                "maxTokens": 1024,
+                "temperature": 0.2
+            }
         )
-        response_body = json.loads(response.get("body").read())
-        generated_text = response_body['content'][0]['text']
+        generated_text = response["output"]["message"]["content"][0]["text"]
         return BedrockResponse(generated_text)
     except Exception as e:
+        error_msg = str(e)
+        if hasattr(e, "response") and isinstance(e.response, dict) and "Error" in e.response:
+            error_msg = e.response["Error"].get("Message", error_msg)
         # Graceful fallback: return a low-risk fallback JSON to keep pipelines stable
         fallback_json = json.dumps({
             "score": 3,
-            "risk_factors": [f"Bedrock fallback triggered (Error: {str(e)[:60]})"],
+            "risk_factors": [f"Bedrock fallback triggered (Error: {error_msg})"],
             "recommendation": "Verify contract details manually. Bedrock service was unavailable during scoring."
         })
         return BedrockResponse(fallback_json)

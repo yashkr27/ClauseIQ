@@ -61,6 +61,9 @@ async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = Fi
     finally:
         for p in paths:
             if os.path.exists(p):
-                os.unlink(p)
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
 
     return CompareResponse(comparison=comparison, net_delta=net_delta)

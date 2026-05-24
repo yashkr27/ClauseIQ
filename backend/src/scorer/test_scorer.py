@@ -154,18 +154,24 @@ def test_hybrid_path_with_enrichment():
     c = _clause('5', 'Liability', 'The liability of each party shall be unlimited for any breach.')
     nodes = load_knowledge_nodes()
     
-    # Mock invoke_model response body
-    mock_body = MagicMock()
-    mock_body.read.return_value = b'{"content": [{"text": "{\\"score\\": 5, \\"risk_factors\\": [\\"Enriched LLM factor\\"], \\"recommendation\\": \\"Negotiate cap\\"}"}]}'
-    mock_response = {"body": mock_body}
+    # Mock converse response body
+    mock_response = {
+        "output": {
+            "message": {
+                "content": [
+                    {"text": '{"score": 5, "risk_factors": ["Enriched LLM factor"], "recommendation": "Negotiate cap"}'}
+                ]
+            }
+        }
+    }
     
     with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
-        mock_client.return_value.invoke_model.return_value = mock_response
+        mock_client.return_value.converse.return_value = mock_response
         
         result = score_clause(c, nodes, enrich=True)
         
-        # Verify Bedrock was invoked
-        mock_client.return_value.invoke_model.assert_called_once()
+        # Verify Bedrock converse was invoked
+        mock_client.return_value.converse.assert_called_once()
         
         assert result.score >= 8
         assert result.risk_level == 'HIGH'
@@ -182,16 +188,22 @@ def test_llm_path_without_constraints():
     c = _clause('1', 'Introduction', 'This agreement is signed by both parties on the date written below.')
     nodes = load_knowledge_nodes()
     
-    mock_body = MagicMock()
-    mock_body.read.return_value = b'{"content": [{"text": "{\\"score\\": 2, \\"risk_factors\\": [\\"Standard intro\\"], \\"recommendation\\": \\"None\\"}"}]}'
-    mock_response = {"body": mock_body}
+    mock_response = {
+        "output": {
+            "message": {
+                "content": [
+                    {"text": '{"score": 2, "risk_factors": ["Standard intro"], "recommendation": "None"}'}
+                ]
+            }
+        }
+    }
     
     with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
-        mock_client.return_value.invoke_model.return_value = mock_response
+        mock_client.return_value.converse.return_value = mock_response
         
         result = score_clause(c, nodes, enrich=False)
         
-        mock_client.return_value.invoke_model.assert_called_once()
+        mock_client.return_value.converse.assert_called_once()
         assert result.score == 2
         assert result.risk_level == 'LOW'
         assert len(result.constraint_violations) == 0
@@ -204,23 +216,29 @@ def test_clause_hash_cache_hit():
     c = _clause('1', 'Introduction', 'This agreement is signed by both parties on the date written below.')
     nodes = load_knowledge_nodes()
     
-    mock_body = MagicMock()
-    mock_body.read.return_value = b'{"content": [{"text": "{\\"score\\": 2, \\"risk_factors\\": [\\"Standard intro\\"], \\"recommendation\\": \\"None\\"}"}]}'
-    mock_response = {"body": mock_body}
+    mock_response = {
+        "output": {
+            "message": {
+                "content": [
+                    {"text": '{"score": 2, "risk_factors": ["Standard intro"], "recommendation": "None"}'}
+                ]
+            }
+        }
+    }
     
     with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
-        mock_client.return_value.invoke_model.return_value = mock_response
+        mock_client.return_value.converse.return_value = mock_response
         
         # First call — populates cache
         res1 = score_clause(c, nodes, enrich=False)
         assert res1.source == 'llm'
-        mock_client.return_value.invoke_model.assert_called_once()
+        mock_client.return_value.converse.assert_called_once()
         
         # Second call — must hit cache
         res2 = score_clause(c, nodes, enrich=False)
         assert res2.source == 'cache'
         # Total calls should still be 1 (bypassed on second call)
-        mock_client.return_value.invoke_model.assert_called_once()
+        mock_client.return_value.converse.assert_called_once()
         
         assert res2.score == res1.score
         assert res2.risk_level == res1.risk_level
@@ -246,16 +264,22 @@ def test_get_anthropic_client_bedrock_bearer_token():
 
 def test_get_model_name_mapping():
     mock_client = MagicMock()
-    assert _get_model_name(mock_client) == "anthropic.claude-3-haiku-20240307-v1:0"
+    # Default is the Inference Profile ARN
+    assert _get_model_name(mock_client) == "arn:aws:bedrock:ap-southeast-2:593106394881:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
     
-    # Verify environment override
+    # Verify environment override via AWS_BEDROCK_MODEL_ID
     with patch.dict(os.environ, {"AWS_BEDROCK_MODEL_ID": "custom-model"}):
         assert _get_model_name(mock_client) == "custom-model"
+        
+    # Verify environment override via MODEL_NAME
+    with patch.dict(os.environ, {"MODEL_NAME": "us.anthropic.claude-haiku-4-5-20251001-v1:0"}):
+        with patch.dict(os.environ, {"AWS_BEDROCK_MODEL_ID": ""}):
+            assert _get_model_name(mock_client) == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 def test_call_llm_defensive_bedrock_retry():
     # Test that _call_llm falls back gracefully to a robust default response if Bedrock is offline/unavailable
     mock_bedrock = MagicMock()
-    mock_bedrock.invoke_model.side_effect = Exception("Bedrock runtime connection failure")
+    mock_bedrock.converse.side_effect = Exception("Bedrock runtime connection failure")
     
     result = _call_llm(mock_bedrock, "dummy-model", "hello", "hashed-user")
     
