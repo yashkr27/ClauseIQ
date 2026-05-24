@@ -41,8 +41,11 @@ class ExtractionResult:
 
 _NOISE_PATTERNS = [
     re.compile(r'^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s+(AM|PM)\s*.*$', re.MULTILINE),
-    re.compile(r'^https?://\S+\s*$', re.MULTILINE),
+    # Use .+ (not \S+) because OCR introduces spaces inside long URLs
+    re.compile(r'^https?://.+$', re.MULTILINE),
     re.compile(r'^Page\s+\d+\s+of\s+\d+\s*$', re.MULTILINE | re.IGNORECASE),
+    # Standalone page fraction lines produced by browser-print OCR: "1/6", "5/6"
+    re.compile(r'^\d+/\d+\s*$', re.MULTILINE),
 ]
 
 def _strip_noise(text: str) -> str:
@@ -64,8 +67,11 @@ _HEADING_PATTERNS = [
     re.compile(r'^(\d+\.\d+)\.?\s+([A-Z][^\n]{2,60})$', re.MULTILINE),
     # integer: "3. Title" or "3 Title" (at line start, followed by uppercase)
     re.compile(r'^(\d+)\.?\s+([A-Z][^\n]{2,60})$', re.MULTILINE),
-    # UPPERCASE section titles (min 4 chars, no digits, standalone line)
+    # ALL CAPS section titles (min 4 chars, standalone line)
     re.compile(r'^([A-Z]{4,}(?:\s+[A-Z]+){0,5})$', re.MULTILINE),
+    # Title Case section headings: 1–6 words, each capitalised, 4–50 chars total
+    # Matches: "Background", "Operative Terms", "Confidentiality", "Return of Materials"
+    re.compile(r'^([A-Z][a-z]{2,}(?:\s+(?:of\s+)?[A-Z][a-z]{1,})*)$', re.MULTILINE),
     # "SCHEDULE A" / "ANNEXURE 1"
     re.compile(r'^(SCHEDULE\s+[A-Z0-9]+|ANNEXURE\s+[A-Z0-9]+)$', re.MULTILINE),
 ]
