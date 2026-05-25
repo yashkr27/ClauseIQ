@@ -1,50 +1,45 @@
--- knowledge_nodes: firm CONSTRAINT / ANTI_PATTERN / DECISION nodes
-CREATE TABLE knowledge_nodes (
-  id          TEXT PRIMARY KEY,          -- e.g. C-010
-  node_type   TEXT NOT NULL,             -- CONSTRAINT | ANTI_PATTERN | DECISION
-  title       TEXT NOT NULL,
-  content     TEXT NOT NULL,
-  practice_area TEXT,
-  tags        JSONB DEFAULT '[]'
+create table if not exists knowledge_nodes (
+  id text primary key,
+  node_type text not null,
+  title text not null,
+  content text not null,
+  practice_area text,
+  tags jsonb default '[]'
 );
 
--- documents: uploaded files
-CREATE TABLE documents (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  filename     TEXT NOT NULL,
-  uploaded_at  TIMESTAMPTZ DEFAULT now(),
-  content_text TEXT
+create table if not exists documents (
+  id uuid primary key default gen_random_uuid(),
+  filename text not null,
+  uploaded_at timestamptz default now(),
+  content_text text
 );
 
--- document_chunks: clauses extracted from a document
-CREATE TABLE document_chunks (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  document_id  UUID REFERENCES documents(id) ON DELETE CASCADE,
-  chunk_index  INT NOT NULL,
-  clause_number TEXT,
-  clause_title  TEXT,
-  clause_type   TEXT,   -- definition|obligation|limitation|termination|indemnity|ip|confidentiality|general
-  text          TEXT NOT NULL
+create table if not exists document_chunks (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid references documents(id) on delete cascade,
+  chunk_index integer not null,
+  clause_number text,
+  clause_title text,
+  clause_type text,
+  text text
 );
 
--- risk_scores: per-clause risk scoring results
-CREATE TABLE risk_scores (
-  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  chunk_id              UUID REFERENCES document_chunks(id) ON DELETE CASCADE,
-  score                 INT NOT NULL CHECK (score BETWEEN 1 AND 10),
-  risk_factors          JSONB DEFAULT '[]',
-  constraint_violations JSONB DEFAULT '[]',
-  recommendation        TEXT
+create table if not exists risk_scores (
+  id uuid primary key default gen_random_uuid(),
+  chunk_id uuid references document_chunks(id) on delete cascade,
+  score integer,
+  risk_factors jsonb default '[]',
+  constraint_violations jsonb default '[]',
+  recommendation text
 );
 
--- comparison_results: clause-level diff between two document versions
-CREATE TABLE comparison_results (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  doc_v1_id        UUID REFERENCES documents(id),
-  doc_v2_id        UUID REFERENCES documents(id),
-  chunk_v1_id      UUID REFERENCES document_chunks(id),
-  chunk_v2_id      UUID REFERENCES document_chunks(id),
-  match_type       TEXT NOT NULL,   -- UNCHANGED|MODIFIED|ADDED|REMOVED
-  similarity_score FLOAT,
-  diff_text        TEXT
+create table if not exists comparison_results (
+  id uuid primary key default gen_random_uuid(),
+  doc_v1_id uuid references documents(id) on delete cascade,
+  doc_v2_id uuid references documents(id) on delete cascade,
+  chunk_v1_id uuid references document_chunks(id),
+  chunk_v2_id uuid references document_chunks(id),
+  match_type text check (match_type in ('UNCHANGED','MODIFIED','ADDED','REMOVED')),
+  similarity_score float,
+  diff_text text
 );

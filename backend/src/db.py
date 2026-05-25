@@ -4,6 +4,7 @@ Lets all layers run and be tested before Supabase is configured.
 """
 import os
 from typing import Optional
+import uuid
 
 _client = None
 
@@ -42,3 +43,23 @@ def mem_get(table: str, filters: Optional[dict] = None) -> list:
 
 def mem_clear(table: str):
     _store[table].clear()
+
+def insert_row(table: str, row: dict) -> dict:
+    """Insert into Supabase if available, else in-memory store."""
+    row.setdefault("id", str(uuid.uuid4()))
+    client = get_client()
+    if client:
+        result = client.table(table).insert(row).execute()
+        return result.data[0]
+    return mem_insert(table, row)
+
+def fetch_rows(table: str, filters: Optional[dict] = None) -> list:
+    """Fetch from Supabase if available, else in-memory store."""
+    client = get_client()
+    if client:
+        query = client.table(table).select("*")
+        if filters:
+            for k, v in filters.items():
+                query = query.eq(k, v)
+        return query.execute().data
+    return mem_get(table, filters)

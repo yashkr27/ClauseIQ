@@ -30,29 +30,32 @@ def _persist_analyse(filename: str, extraction, clauses, scores):
         }).execute().data[0]
         doc_id = doc_row["id"]
 
-        # 2. document_chunks
+        # 2. document_chunks — capture returned UUIDs
+        chunk_id_map = {}
         for c in clauses:
-            client.table("document_chunks").insert({
-                "document_id":  doc_id,
-                "chunk_index":  c.chunk_index,
+            row = client.table("document_chunks").insert({
+                "document_id":   doc_id,
+                "chunk_index":   c.chunk_index,
                 "clause_number": c.clause_number,
                 "clause_title":  c.clause_title,
                 "clause_type":   c.clause_type,
                 "text":          c.text,
-            }).execute()
+            }).execute().data[0]
+            chunk_id_map[c.chunk_index] = row["id"]  # ← real UUID
 
-        # 3. risk_scores
+        # 3. risk_scores — use UUID not chunk_index
         for s in scores:
-            client.table("risk_scores").insert({
-                "chunk_id":             s.chunk_index,
-                "score":                s.score,
-                "risk_factors":         s.risk_factors,
-                "constraint_violations": s.constraint_violations,
-                "recommendation":       s.recommendation,
-            }).execute()
+            chunk_uuid = chunk_id_map.get(s.chunk_index)
+            if chunk_uuid:
+                client.table("risk_scores").insert({
+                    "chunk_id":              chunk_uuid,  # ← fixed
+                    "score":                 s.score,
+                    "risk_factors":          s.risk_factors,
+                    "constraint_violations": s.constraint_violations,
+                    "recommendation":        s.recommendation,
+                }).execute()
 
     except Exception:
-        # Persistence is best-effort — never fail the API response
         pass
 
 
