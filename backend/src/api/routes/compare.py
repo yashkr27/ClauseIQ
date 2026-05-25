@@ -11,7 +11,7 @@ import shutil
 
 from ...extraction.extractor import extract
 from ...chunker.chunker import chunk
-from ...scorer.scorer import score_document, compute_risk_delta
+from ...scorer.scorer import score_document, compute_risk_delta, suggest_negotiation
 from ...comparator.comparator import compare
 from ...models.schemas import CompareResponse
 from ...db import db_available, get_client
@@ -82,6 +82,7 @@ async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = Fi
     scores_v1     = []
     scores_v2     = []
     comparison    = []
+    suggestions   = []
     net_delta     = 'UNCHANGED'
 
     try:
@@ -114,6 +115,8 @@ async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = Fi
         comparison = compare(clauses_v1, clauses_v2)
         comparison = compute_risk_delta(scores_v1, scores_v2, comparison)
 
+        suggestions = suggest_negotiation(comparison, scores_v1, scores_v2)
+
         # Rule M3: net_delta is mandatory
         deltas    = [r.risk_delta for r in comparison if r.risk_delta not in (None, 'N/A')]
         increased = deltas.count('INCREASED')
@@ -144,4 +147,4 @@ async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = Fi
         if doc_v1_id and doc_v2_id:
             _persist_compare(comparison, doc_v1_id, doc_v2_id)
 
-    return CompareResponse(comparison=comparison, net_delta=net_delta)
+    return CompareResponse(comparison=comparison, net_delta=net_delta, suggestions=suggestions)
