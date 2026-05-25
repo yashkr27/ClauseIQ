@@ -13,42 +13,42 @@ import hashlib
 from ..models.schemas import Clause, RiskScore
 from .knowledge import load_knowledge_nodes
 
-# Lazy Anthropic client initialization to prevent import-time crashes if API key is missing
+# Lazy Bedrock client initialization
 _client = None
 
-# Global in-memory cache for mapping clause SHA-256 hashes to scored results
+# Global in-memory cache: clause SHA-256 → scored result
 _risk_score_cache = {}
+
 
 def _get_anthropic_client():
     global _client
     if _client is None:
         import boto3
-        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_access_key    = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret_key    = os.getenv("AWS_SECRET_ACCESS_KEY")
         aws_session_token = os.getenv("AWS_SESSION_TOKEN")
-        aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
-        
-        # Build boto3 client configuration dynamically
+        aws_region        = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+
         kwargs = {
             "service_name": "bedrock-runtime",
             "region_name": aws_region.strip() if aws_region else "us-east-1"
         }
         if aws_access_key and aws_secret_key:
-            kwargs["aws_access_key_id"] = aws_access_key.strip()
+            kwargs["aws_access_key_id"]     = aws_access_key.strip()
             kwargs["aws_secret_access_key"] = aws_secret_key.strip()
             if aws_session_token:
                 kwargs["aws_session_token"] = aws_session_token.strip()
-                
-        # boto3 automatically picks up AWS_BEARER_TOKEN_BEDROCK when it's present in the environment
+
         _client = boto3.client(**kwargs)
     return _client
 
 
 def _get_model_name(client) -> str:
-    """
-    Returns the Amazon Bedrock Claude model ID / Inference Profile ARN.
-    """
-    val = os.getenv("AWS_BEDROCK_MODEL_ID") or os.getenv("MODEL_NAME") or "arn:aws:bedrock:ap-southeast-2:593106394881:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    val = (
+        os.getenv("AWS_BEDROCK_MODEL_ID")
+        or os.getenv("MODEL_NAME")
+        or "arn:aws:bedrock:ap-southeast-2:593106394881:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    )
     return val.strip()
 
 
@@ -64,8 +64,8 @@ class BedrockResponse:
 
 def _call_llm(client, model_name: str, prompt: str, hashed_user: str) -> BedrockResponse:
     """
-    Directly invokes Amazon Bedrock using boto3 runtime client converse() API.
-    Features a graceful fallback if Bedrock is unavailable or fails.
+    Invokes Amazon Bedrock via boto3 converse() API.
+    Graceful fallback to UNSCORED sentinel on any failure.
     """
     try:
         if not prompt.strip():
@@ -74,38 +74,31 @@ def _call_llm(client, model_name: str, prompt: str, hashed_user: str) -> Bedrock
         messages = [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "text": prompt.strip()
-                    }
-                ]
+                "content": [{"text": prompt.strip()}]
             }
         ]
 
         response = client.converse(
             modelId=model_name,
             messages=messages,
-            inferenceConfig={
-                "maxTokens": 1024,
-                "temperature": 0.2
-            }
+            inferenceConfig={"maxTokens": 1024, "temperature": 0.2}
         )
         generated_text = response["output"]["message"]["content"][0]["text"]
         return BedrockResponse(generated_text)
+
     except Exception as e:
         error_msg = str(e)
         if hasattr(e, "response") and isinstance(e.response, dict) and "Error" in e.response:
             error_msg = e.response["Error"].get("Message", error_msg)
-        # Graceful fallback: return UNSCORED sentinel so the caller can detect the failure
         fallback_json = json.dumps({
             "score": None,
             "risk_factors": [f"Scoring unavailable (Bedrock error: {error_msg})"],
-            "recommendation": "Manual review required \u2014 risk scoring service was unavailable."
+            "recommendation": "Manual review required — risk scoring service was unavailable."
         })
         return BedrockResponse(fallback_json)
 
 
-# ── word-number normalisation for constraint checks (Fix 3) ──────────────────
+# ── Word-number normalisation ─────────────────────────────────────────────────
 
 _WORD_NUMS = {
     'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
@@ -114,22 +107,21 @@ _WORD_NUMS = {
     'twenty-four': 24, 'twenty four': 24,
 }
 
+
 def _normalise_numeric_text(text: str) -> str:
-    """Replace written numbers before time-units so regex finds them."""
+    """Replace written numbers with digits so regex duration checks work."""
     result = text
-    # Process multi-word keys first (e.g. 'twenty-four' before 'twenty' and 'four')
     for word, val in sorted(_WORD_NUMS.items(), key=lambda x: -len(x[0])):
         result = re.sub(rf'\b{re.escape(word)}\b', str(val), result, flags=re.IGNORECASE)
     return result
 
-# ── CONSTRAINT override rules (S2) ────────────────────────────────────────────
-# Logic lives in Python, NOT in the LLM prompt.
-# Each entry: (constraint_id, check_function, minimum_score)
+
+# ── Deterministic constraint checks (Rule S2) ─────────────────────────────────
 
 def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str]]:
     """
-    Returns (minimum_score_from_constraints, [triggered_constraint_ids])
-    Rule S2: this result overrides whatever the LLM returned if it's higher.
+    Returns (minimum_score_from_constraints, [triggered_constraint_ids]).
+    Rule S2: overrides LLM score if higher.
     """
     text  = clause.text.lower()
     title = clause.clause_title.lower()
@@ -149,9 +141,9 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
                                 'non solicit']):
         norm = _normalise_numeric_text(text)
         months = re.findall(r'(\d+)\s*month', norm)
-        years  = re.findall(r'(\d+)\s*year', norm)
+        years  = re.findall(r'(\d+)\s*year',  norm)
         duration_months = max([int(m) for m in months], default=0)
-        duration_months = max(duration_months, max([int(y)*12 for y in years], default=0))
+        duration_months = max(duration_months, max([int(y) * 12 for y in years], default=0))
         if duration_months > 12:
             violations.append('C-011')
             min_score = max(min_score, 7)
@@ -162,16 +154,17 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
             violations.append('C-012')
             min_score = max(min_score, 7)
 
-    # C-013: no arbitration in dispute/governing law clause
-    if any(w in title for w in ['dispute', 'governing', 'jurisdiction', 'resolution', 'law']) \
-       or any(w in text[:300] for w in ['governing law', 'jurisdiction', 'venue', 'courts of', 'applicable law']):
+    # C-013: no arbitration in dispute/governing law clause (title OR body scan)
+    if (any(w in title for w in ['dispute', 'governing', 'jurisdiction', 'resolution', 'law'])
+            or any(w in text[:300] for w in ['governing law', 'jurisdiction', 'venue',
+                                              'courts of', 'applicable law'])):
         if 'arbitration' not in text and 'arbitrate' not in text:
             violations.append('C-013')
             min_score = max(min_score, 6)
 
     # C-014: termination notice < 90 days
     if 'terminat' in text and 'notice' in text:
-        days  = re.findall(r'(\d+)\s*day', text)
+        days = re.findall(r'(\d+)\s*day', text)
         if days:
             min_days = min(int(d) for d in days)
             if min_days < 90:
@@ -181,11 +174,9 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
     return min_score, violations
 
 
+# ── LLM prompt builder (Rule S1) ─────────────────────────────────────────────
+
 def _build_prompt(clause: Clause, nodes: list[dict]) -> str:
-    """
-    Rule S1: inject ALL knowledge nodes into prompt.
-    The LLM sees firm policy alongside the clause text.
-    """
     node_text = '\n'.join(
         f"[{n['id']} — {n['node_type']}] {n['title']}: {n['content']}"
         for n in nodes
@@ -213,6 +204,8 @@ Score guide: 1-3=LOW risk, 4-6=MEDIUM risk, 7-10=HIGH risk.
 Reference specific firm knowledge node IDs (e.g. C-010) when they apply."""
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _score_level(score: int) -> str:
     if score == 0:  return 'UNSCORED'
     if score <= 3:  return 'LOW'
@@ -221,11 +214,8 @@ def _score_level(score: int) -> str:
 
 
 def _baseline_score(clause: Clause) -> tuple[int, list[str], str]:
-    """
-    Fast non-LLM baseline for clauses that do not trigger firm constraints.
-    Use enrich=True for semantic LLM detail.
-    """
-    text = clause.text.lower()
+    """Fast non-LLM baseline when no constraints fire and enrich=False."""
+    text  = clause.text.lower()
     score = 2
     factors = ["No firm constraint triggered."]
 
@@ -257,12 +247,15 @@ def _baseline_score(clause: Clause) -> tuple[int, list[str], str]:
     return score, factors, recommendation
 
 
+# ── Core scoring functions ────────────────────────────────────────────────────
+
 def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> RiskScore:
     """
-    Scores a single clause. Applies CONSTRAINT override after LLM call (rule S2).
-    Uses deterministic-first scoring, optional lightweight semantic enrichment, and caching.
+    Scores a single clause.
+    Priority: cache → deterministic constraints → LLM (if enrich=True).
+    Rule S2: constraint score overrides LLM score.
     """
-    # 1. Check in-memory clause-hash cache first to avoid redundant LLM calls
+    # 1. In-memory cache check
     clause_hash = hashlib.sha256(clause.text.strip().encode('utf-8')).hexdigest()
     if clause_hash in _risk_score_cache:
         cached = _risk_score_cache[clause_hash]
@@ -278,68 +271,67 @@ def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> Ris
             source="cache"
         )
 
-    # 2. Check deterministic Python-defined constraints first (Rule S2)
+    # 2. Deterministic constraint checks (Rule S2)
     constraint_min, violations = _check_constraints(clause, nodes)
-    
-    # 3. Decision Path
-    if len(violations) > 0:
-        # Constraint(s) triggered — deterministic decision path is primary
+
+    # 3. Decision path
+    if violations:
         final_score = constraint_min
-        risk_level = _score_level(final_score)
-        
+        risk_level  = _score_level(final_score)
         triggered_nodes = [n for n in nodes if n['id'] in violations]
-        
+
         if not enrich:
-            # Bypass LLM completely for maximum speed / zero API cost
-            risk_factors = [f"Constraint triggered: {n['title']}" for n in triggered_nodes]
+            risk_factors   = [f"Constraint triggered: {n['title']}" for n in triggered_nodes]
             recommendation = "; ".join(n['content'] for n in triggered_nodes)
-            source = "deterministic"
+            source         = "deterministic"
         else:
-            # Hybrid path: Constraint score + lightweight semantic enrichment
-            prompt = _build_prompt(clause, nodes)
+            prompt      = _build_prompt(clause, nodes)
             hashed_user = hashlib.sha256(b"clauseiq-anonymous-user").hexdigest()
-            client = _get_anthropic_client()
-            model_name = _get_model_name(client)
-            response = _call_llm(client, model_name, prompt, hashed_user)
-            
-            raw = response.content[0].text.strip()
-            raw = re.sub(r'^```json\s*|```$', '', raw, flags=re.MULTILINE).strip()
-            data = json.loads(raw)
-            
-            risk_factors = data.get('risk_factors', [])
+            client      = _get_anthropic_client()
+            model_name  = _get_model_name(client)
+            response    = _call_llm(client, model_name, prompt, hashed_user)
+            raw         = re.sub(r'^```json\s*|```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+            data        = json.loads(raw)
+            risk_factors   = data.get('risk_factors', [])
             recommendation = data.get('recommendation', '')
-            source = "hybrid"
-            
+            source         = "hybrid"
+
     else:
-        # No constraints triggered - use fast baseline unless enrichment is requested.
         if not enrich:
             final_score, risk_factors, recommendation = _baseline_score(clause)
             risk_level = _score_level(final_score)
-            source = "deterministic"
+            source     = "deterministic"
         else:
-            prompt = _build_prompt(clause, nodes)
+            prompt      = _build_prompt(clause, nodes)
             hashed_user = hashlib.sha256(b"clauseiq-anonymous-user").hexdigest()
-            client = _get_anthropic_client()
-            model_name = _get_model_name(client)
-            response = _call_llm(client, model_name, prompt, hashed_user)
-
-            raw = response.content[0].text.strip()
-            raw = re.sub(r'^```json\s*|```$', '', raw, flags=re.MULTILINE).strip()
-            data = json.loads(raw)
+            client      = _get_anthropic_client()
+            model_name  = _get_model_name(client)
+            response    = _call_llm(client, model_name, prompt, hashed_user)
+            raw         = re.sub(r'^```json\s*|```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+            data        = json.loads(raw)
 
             llm_score_raw = data.get('score')
             if llm_score_raw is None:
                 final_score = 0
-                risk_level = 'UNSCORED'
+                risk_level  = 'UNSCORED'
             else:
                 final_score = max(1, min(10, int(llm_score_raw)))
-                risk_level = _score_level(final_score)
-            risk_factors = data.get('risk_factors', [])
-            recommendation = data.get('recommendation', '')
-            source = "llm"
+                risk_level  = _score_level(final_score)
 
-    # Construct the resulting RiskScore
-    result = RiskScore(
+            risk_factors   = data.get('risk_factors', [])
+            recommendation = data.get('recommendation', '')
+            source         = "llm"
+
+    # 4. Cache and return
+    _risk_score_cache[clause_hash] = {
+        'score':                final_score,
+        'risk_level':           risk_level,
+        'risk_factors':         risk_factors,
+        'constraint_violations': violations,
+        'recommendation':       recommendation,
+    }
+
+    return RiskScore(
         chunk_index=clause.chunk_index,
         clause_number=clause.clause_number,
         clause_title=clause.clause_title,
@@ -351,20 +343,9 @@ def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> Ris
         source=source
     )
 
-    # 4. Cache results for future duplicate clauses
-    _risk_score_cache[clause_hash] = {
-        'score': final_score,
-        'risk_level': risk_level,
-        'risk_factors': risk_factors,
-        'constraint_violations': violations,
-        'recommendation': recommendation,
-    }
-
-    return result
-
 
 def score_document(clauses: list[Clause], enrich: bool = False) -> list[RiskScore]:
-    """Score all clauses in a document. Rule SB1: loads nodes automatically."""
+    """Score all clauses. Rule SB1: loads knowledge nodes automatically."""
     nodes = load_knowledge_nodes()
     return [score_clause(c, nodes, enrich=enrich) for c in clauses]
 
@@ -375,7 +356,6 @@ def compute_risk_delta(scores_v1: list[RiskScore],
     """
     Rule S4: attach risk delta to each ComparisonResult.
     delta = score_v2 - score_v1
-    > 0 → INCREASED, < 0 → DECREASED, = 0 → UNCHANGED
     """
     v1_map = {s.clause_number: s.score for s in scores_v1}
     v2_map = {s.clause_number: s.score for s in scores_v2}

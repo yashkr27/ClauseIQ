@@ -12,9 +12,49 @@ from ...extraction.extractor import extract
 from ...chunker.chunker import chunk
 from ...scorer.scorer import score_document
 from ...models.schemas import AnalyseResponse, RiskSummary
+from ...db import db_available, get_client
 
 router = APIRouter()
 MAX_BYTES = 20 * 1024 * 1024
+
+
+def _persist_analyse(filename: str, extraction, clauses, scores):
+    """Write document, chunks and risk scores to Supabase."""
+    try:
+        client = get_client()
+
+        # 1. documents
+        doc_row = client.table("documents").insert({
+            "filename": filename,
+            "content_text": extraction.text[:5000]
+        }).execute().data[0]
+        doc_id = doc_row["id"]
+
+        # 2. document_chunks
+        for c in clauses:
+            client.table("document_chunks").insert({
+                "document_id":  doc_id,
+                "chunk_index":  c.chunk_index,
+                "clause_number": c.clause_number,
+                "clause_title":  c.clause_title,
+                "clause_type":   c.clause_type,
+                "text":          c.text,
+            }).execute()
+
+        # 3. risk_scores
+        for s in scores:
+            client.table("risk_scores").insert({
+                "chunk_id":             s.chunk_index,
+                "score":                s.score,
+                "risk_factors":         s.risk_factors,
+                "constraint_violations": s.constraint_violations,
+                "recommendation":       s.recommendation,
+            }).execute()
+
+    except Exception:
+        # Persistence is best-effort — never fail the API response
+        pass
+
 
 @router.post("/api/analyse", response_model=AnalyseResponse)
 async def analyse(file: UploadFile = File(...)):
@@ -37,6 +77,7 @@ async def analyse(file: UploadFile = File(...)):
         extraction = extract(tmp_path)
         clauses    = chunk(extraction)
         scores     = score_document(clauses)
+
     except HTTPException:
         raise
     except Exception as e:
@@ -48,10 +89,13 @@ async def analyse(file: UploadFile = File(...)):
             except Exception:
                 pass
 
+    if db_available():
+        _persist_analyse(filename, extraction, clauses, scores)
+
     summary = RiskSummary(
-        high   = sum(1 for s in scores if s.risk_level == 'HIGH'),
-        medium = sum(1 for s in scores if s.risk_level == 'MEDIUM'),
-        low    = sum(1 for s in scores if s.risk_level == 'LOW'),
+        high     = sum(1 for s in scores if s.risk_level == 'HIGH'),
+        medium   = sum(1 for s in scores if s.risk_level == 'MEDIUM'),
+        low      = sum(1 for s in scores if s.risk_level == 'LOW'),
         unscored = sum(1 for s in scores if s.risk_level == 'UNSCORED'),
     )
 
