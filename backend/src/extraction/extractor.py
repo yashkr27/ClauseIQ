@@ -15,6 +15,7 @@ ExtractionResult:
 import re
 import os
 import sys
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -186,6 +187,13 @@ def _extract_docx(file_path: str) -> tuple[str, int]:
 
 _EXTRACTION_CACHE = {}
 
+def _file_digest(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
 def extract(file_path: str) -> ExtractionResult:
     """
     Single entry point for all file types.
@@ -197,14 +205,11 @@ def extract(file_path: str) -> ExtractionResult:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    # Check cache to guarantee <2s execution time on repeated runs
-    mtime = path.stat().st_mtime
     size = path.stat().st_size
-    cache_key = (str(path), mtime, size)
+    ext = path.suffix.lower()
+    cache_key = (ext, size, _file_digest(path))
     if cache_key in _EXTRACTION_CACHE:
         return _EXTRACTION_CACHE[cache_key]
-
-    ext = path.suffix.lower()
 
     if ext == '.pdf':
         raw_text, pages = _extract_pdf(str(path))

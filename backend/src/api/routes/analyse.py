@@ -14,6 +14,7 @@ from ...scorer.scorer import score_document
 from ...models.schemas import AnalyseResponse, RiskSummary
 
 router = APIRouter()
+MAX_BYTES = 20 * 1024 * 1024
 
 @router.post("/api/analyse", response_model=AnalyseResponse)
 async def analyse(file: UploadFile = File(...)):
@@ -27,9 +28,17 @@ async def analyse(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
+        file_size = os.path.getsize(tmp_path)
+        if file_size > MAX_BYTES:
+            raise HTTPException(status_code=400, detail="File exceeds 20 MB limit.")
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
         extraction = extract(tmp_path)
         clauses    = chunk(extraction)
         scores     = score_document(clauses)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Extraction or analysis failed: {str(e)}")
     finally:
@@ -43,6 +52,7 @@ async def analyse(file: UploadFile = File(...)):
         high   = sum(1 for s in scores if s.risk_level == 'HIGH'),
         medium = sum(1 for s in scores if s.risk_level == 'MEDIUM'),
         low    = sum(1 for s in scores if s.risk_level == 'LOW'),
+        unscored = sum(1 for s in scores if s.risk_level == 'UNSCORED'),
     )
 
     return AnalyseResponse(

@@ -110,3 +110,28 @@ def test_nda_comparison_finds_changes():
     # From T2: must find added clauses (Antitrust, Attorney-Client Privilege, Survival)
     assert len(added) >= 2,    f"Expected >=2 ADDED clauses, got {len(added)}"
     assert len(modified) >= 2, f"Expected >=2 MODIFIED clauses, got {len(modified)}"
+
+
+def test_split_clause_not_reported_as_added():
+    old = _clause(
+        '8',
+        'Indemnification',
+        'Seller shall indemnify Buyer for direct losses, third party claims, defense costs, and settlement amounts arising from breach.'
+    )
+    new_direct = _clause(
+        '8',
+        'Direct Indemnity',
+        'Seller shall indemnify Buyer for direct losses and defense costs arising from breach.'
+    )
+    new_third_party = _clause(
+        '8A',
+        'Third Party Claims',
+        'Seller shall indemnify Buyer for third party claims, defense costs, and settlement amounts arising from breach.'
+    )
+
+    results = compare([old], [new_direct, new_third_party])
+    split_rows = [r for r in results if r.clause_number_v1 == '8' and r.clause_number_v2 == '8A']
+    added_8a = [r for r in results if r.match_type == MatchType.ADDED and r.clause_number_v2 == '8A']
+
+    assert split_rows, "Split clause 8A should remain linked to original clause 8"
+    assert not added_8a, "Split clause 8A should not be reported as a brand-new addition"

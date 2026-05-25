@@ -18,6 +18,8 @@ from ..models.schemas import Clause, ComparisonResult, MatchType
 # ── thresholds (CP2) ──────────────────────────────────────────────────────────
 UNCHANGED_THRESHOLD = 0.95
 MODIFIED_THRESHOLD  = 0.40
+SPLIT_MATCH_THRESHOLD = 0.28
+HIGH_SEMANTIC_THRESHOLD = 0.55
 
 
 # ── heading normalisation for L1 (CP1, CP4) ──────────────────────────────────
@@ -38,6 +40,28 @@ def _normalise_heading(raw: str) -> str:
     if re.match(r'^\d+\.0$', s):
         s = s.split('.')[0]
     return s.strip()
+
+
+def _base_clause_number(raw: str | None) -> str:
+    """Return the top-level number used for split detection: 8A -> 8, 8.1 -> 8."""
+    if not raw:
+        return ''
+    s = _normalise_heading(raw)
+    m = re.match(r'^(\d+)', s)
+    return m.group(1) if m else s
+
+
+def _text_similarity(text_v1: str, text_v2: str) -> float:
+    """Small robust similarity helper shared by L1 and split matching."""
+    if text_v1.strip() == text_v2.strip():
+        return 1.0
+    if not text_v1.strip() or not text_v2.strip():
+        return 0.0
+    try:
+        matrix = TfidfVectorizer(stop_words='english').fit_transform([text_v1, text_v2])
+        return float(cosine_similarity(matrix)[0][1])
+    except Exception:
+        return difflib.SequenceMatcher(None, text_v1, text_v2).ratio()
 
 
 # ── word-level diff (CP3) ─────────────────────────────────────────────────────
@@ -156,18 +180,7 @@ def compare(clauses_v1: list[Clause], clauses_v2: list[Clause]) -> list[Comparis
     matched_l1, unmatched_v1, unmatched_v2 = _l1_match(clauses_v1, clauses_v2)
 
     for c1, c2 in matched_l1:
-        if c1.text.strip() == c2.text.strip():
-            sim = 1.0
-        elif not c1.text.strip() or not c2.text.strip():
-            sim = 0.0
-        else:
-            try:
-                sim = float(cosine_similarity(
-                    TfidfVectorizer(stop_words='english').fit_transform([c1.text, c2.text])
-                )[0][1])
-            except Exception:
-                # difflib ratio fallback
-                sim = difflib.SequenceMatcher(None, c1.text, c2.text).ratio()
+        sim = _text_similarity(c1.text, c2.text)
 
         if sim > UNCHANGED_THRESHOLD:
             match_type = MatchType.UNCHANGED
@@ -203,6 +216,43 @@ def compare(clauses_v1: list[Clause], clauses_v2: list[Clause]) -> list[Comparis
             risk_delta=None, score_v1=None, score_v2=None,
         ))
         semantic_v1_matched.add(c1.clause_number)
+        semantic_v2_matched.add(c2.clause_number)
+
+    # Split detection: if a v2 clause like "8A" is a semantic continuation of
+    # an already matched v1 clause "8", classify it as MODIFIED instead of ADDED.
+    matched_sources = [c1 for c1, _ in matched_l1] + [c1 for c1, _, _ in semantic_pairs]
+    for j in sorted(unmatched_v2):
+        c2 = clauses_v2[j]
+        if c2.clause_number in semantic_v2_matched:
+            continue
+
+        best = None
+        for c1 in matched_sources:
+            score = _text_similarity(c1.text, c2.text)
+            same_base = (
+                _base_clause_number(c1.clause_number)
+                and _base_clause_number(c1.clause_number) == _base_clause_number(c2.clause_number)
+            )
+            if not same_base and score < HIGH_SEMANTIC_THRESHOLD:
+                continue
+            if score < SPLIT_MATCH_THRESHOLD:
+                continue
+            if best is None or score > best[2]:
+                best = (c1, c2, score)
+
+        if best is None:
+            continue
+
+        c1, c2, sim = best
+        results.append(ComparisonResult(
+            match_type=MatchType.MODIFIED,
+            clause_number_v1=c1.clause_number,
+            clause_number_v2=c2.clause_number,
+            clause_title=c2.clause_title or c1.clause_title,
+            similarity_score=round(sim, 3),
+            diff_text=json.dumps(_word_diff(c1.text, c2.text)),
+            risk_delta=None, score_v1=None, score_v2=None,
+        ))
         semantic_v2_matched.add(c2.clause_number)
 
     # Remaining unmatched v1 = REMOVED

@@ -39,6 +39,7 @@ def _score(num, s):
 def test_score_level_low():    assert _score_level(3) == 'LOW'
 def test_score_level_medium(): assert _score_level(5) == 'MEDIUM'
 def test_score_level_high():   assert _score_level(8) == 'HIGH'
+def test_score_level_unscored(): assert _score_level(0) == 'UNSCORED'
 
 
 # ── S2 — CONSTRAINT overrides (Python logic, not prompt) ─────────────────────
@@ -138,6 +139,22 @@ def test_risk_delta_decreased():
     updated = compute_risk_delta([_score('5', 8)], [_score('5', 3)], [r])
     assert updated[0].risk_delta == 'DECREASED'
 
+def test_risk_delta_added_high_risk_increases():
+    r = ComparisonResult(
+        match_type=MatchType.ADDED,
+        clause_number_v1=None,
+        clause_number_v2='11A',
+        clause_title='Non-Solicitation',
+        similarity_score=0.0,
+        diff_text=None,
+        risk_delta=None,
+        score_v1=None,
+        score_v2=None
+    )
+    updated = compute_risk_delta([], [_score('11A', 8)], [r])
+    assert updated[0].risk_delta == 'INCREASED'
+    assert updated[0].score_v2 == 8
+
 
 # ── Hybrid Risk Engine Path Tests ─────────────────────────────────────────────
 from unittest.mock import patch, MagicMock
@@ -200,7 +217,23 @@ def test_hybrid_path_with_enrichment():
         assert result.recommendation == "Negotiate cap"
 
 
-def test_llm_path_without_constraints():
+def test_deterministic_baseline_without_constraints():
+    _risk_score_cache.clear()
+
+    c = _clause('1', 'Introduction', 'This agreement is signed by both parties on the date written below.')
+    nodes = load_knowledge_nodes()
+
+    with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
+        result = score_clause(c, nodes, enrich=False)
+
+        mock_client.assert_not_called()
+        assert result.score == 2
+        assert result.risk_level == 'LOW'
+        assert len(result.constraint_violations) == 0
+        assert result.source == 'deterministic'
+
+
+def test_llm_path_without_constraints_when_enriched():
     _risk_score_cache.clear()
     
     # General clause with no triggers
@@ -220,7 +253,7 @@ def test_llm_path_without_constraints():
     with patch('src.scorer.scorer._get_anthropic_client') as mock_client:
         mock_client.return_value.converse.return_value = mock_response
         
-        result = score_clause(c, nodes, enrich=False)
+        result = score_clause(c, nodes, enrich=True)
         
         mock_client.return_value.converse.assert_called_once()
         assert result.score == 2
@@ -249,12 +282,12 @@ def test_clause_hash_cache_hit():
         mock_client.return_value.converse.return_value = mock_response
         
         # First call — populates cache
-        res1 = score_clause(c, nodes, enrich=False)
+        res1 = score_clause(c, nodes, enrich=True)
         assert res1.source == 'llm'
         mock_client.return_value.converse.assert_called_once()
         
         # Second call — must hit cache
-        res2 = score_clause(c, nodes, enrich=False)
+        res2 = score_clause(c, nodes, enrich=True)
         assert res2.source == 'cache'
         # Total calls should still be 1 (bypassed on second call)
         mock_client.return_value.converse.assert_called_once()
@@ -296,7 +329,7 @@ def test_get_model_name_mapping():
             assert _get_model_name(mock_client) == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 def test_call_llm_defensive_bedrock_retry():
-    # Test that _call_llm falls back gracefully to a robust default response if Bedrock is offline/unavailable
+    # Test that _call_llm reports an unscored sentinel if Bedrock is offline/unavailable
     mock_bedrock = MagicMock()
     mock_bedrock.converse.side_effect = Exception("Bedrock runtime connection failure")
     
@@ -305,7 +338,7 @@ def test_call_llm_defensive_bedrock_retry():
     # It must return a valid BedrockResponse with fallback JSON content
     assert result.content[0].text is not None
     data = json.loads(result.content[0].text)
-    assert data["score"] == 3
-    assert "fallback" in data["risk_factors"][0]
+    assert data["score"] is None
+    assert "Scoring unavailable" in data["risk_factors"][0]
 
 

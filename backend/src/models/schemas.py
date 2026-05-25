@@ -51,6 +51,7 @@ class RiskSummary(BaseModel):
     high:   int
     medium: int
     low:    int
+    unscored: int = 0
 
 class AnalyseResponse(BaseModel):
     filename:     str

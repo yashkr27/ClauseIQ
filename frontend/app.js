@@ -3,6 +3,9 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const API_BASE = 'http://127.0.0.1:8000';
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 90000;
+const SLOW_MESSAGE_MS = 15000;
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -14,16 +17,25 @@ let v2File = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   initTabs();
-  initUploadZone('upload-analyse', 'analyse-file-input', 'analyse-filename', f => {
+  initUploadZone('upload-analyse', 'analyse-file-input', 'analyse-filename', 'analyse-reset', f => {
     analyseFile = f;
     updateSubmitState();
-  });
-  initUploadZone('upload-v1', 'v1-file-input', 'v1-filename', f => {
-    v1File = f;
+  }, () => {
+    analyseFile = null;
     updateSubmitState();
   });
-  initUploadZone('upload-v2', 'v2-file-input', 'v2-filename', f => {
+  initUploadZone('upload-v1', 'v1-file-input', 'v1-filename', 'v1-reset', f => {
+    v1File = f;
+    updateSubmitState();
+  }, () => {
+    v1File = null;
+    updateSubmitState();
+  });
+  initUploadZone('upload-v2', 'v2-file-input', 'v2-filename', 'v2-reset', f => {
     v2File = f;
+    updateSubmitState();
+  }, () => {
+    v2File = null;
     updateSubmitState();
   });
 
@@ -51,10 +63,11 @@ function initTabs() {
 
 // ── Upload Zone ──────────────────────────────────────────────────────────
 
-function initUploadZone(zoneId, inputId, filenameId, onFile) {
+function initUploadZone(zoneId, inputId, filenameId, resetId, onFile, onClear) {
   const zone = document.getElementById(zoneId);
   const input = document.getElementById(inputId);
   const filenameEl = document.getElementById(filenameId);
+  const resetBtn = document.getElementById(resetId);
 
   zone.addEventListener('click', () => input.click());
   zone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') input.click(); });
@@ -79,15 +92,46 @@ function initUploadZone(zoneId, inputId, filenameId, onFile) {
       alert('Please upload a PDF or DOCX file.');
       return;
     }
+    if (file.size > MAX_FILE_BYTES) {
+      alert('File exceeds 20 MB limit. Please upload a smaller document.');
+      return;
+    }
     zone.classList.add('has-file');
     filenameEl.textContent = `✓ ${file.name}`;
+    resetBtn.hidden = false;
     onFile(file);
   }
+
+  resetBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    zone.classList.remove('has-file');
+    filenameEl.textContent = '';
+    input.value = '';
+    resetBtn.hidden = true;
+    onClear();
+  });
 }
 
 function updateSubmitState() {
   document.getElementById('analyse-submit').disabled = !analyseFile;
   document.getElementById('compare-submit').disabled = !(v1File && v2File);
+}
+
+function startRequestTimers(loadingEl, controller) {
+  const slowTimer = setTimeout(() => {
+    loadingEl.innerHTML += `
+      <p class="loading-note">
+        Still working. AI scoring large documents can take up to 60 seconds.
+      </p>
+    `;
+  }, SLOW_MESSAGE_MS);
+
+  const hardTimeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  return () => {
+    clearTimeout(slowTimer);
+    clearTimeout(hardTimeout);
+  };
 }
 
 
@@ -105,11 +149,17 @@ async function handleAnalyse() {
   btn.classList.add('loading');
   btn.textContent = 'Analysing…';
   btn.disabled = true;
+  const controller = new AbortController();
+  const clearTimers = startRequestTimers(loadingEl, controller);
 
   try {
     const form = new FormData();
     form.append('file', analyseFile);
-    const res = await fetch(`${API_BASE}/api/analyse`, { method: 'POST', body: form });
+    const res = await fetch(`${API_BASE}/api/analyse`, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || `Server error ${res.status}`);
@@ -120,8 +170,12 @@ async function handleAnalyse() {
     initClauseCards(resultsEl);
   } catch (e) {
     loadingEl.innerHTML = '';
+    if (e.name === 'AbortError') {
+      e.message = 'Request timed out after 90 seconds. Try a smaller document.';
+    }
     errorEl.innerHTML = `<div class="error-box">⚠️ ${escapeHtml(e.message)}</div>`;
   } finally {
+    clearTimers();
     btn.classList.remove('loading');
     btn.textContent = 'Analyse Contract';
     btn.disabled = false;
@@ -130,7 +184,7 @@ async function handleAnalyse() {
 
 function renderAnalyseResults(data) {
   const { filename, clauses, risk_scores, risk_summary } = data;
-  const total = risk_summary.high + risk_summary.medium + risk_summary.low;
+  const total = risk_summary.high + risk_summary.medium + risk_summary.low + (risk_summary.unscored || 0);
 
   // Merge clause text/type into risk scores by chunk_index
   const clauseMap = {};
@@ -153,10 +207,12 @@ function renderRiskSummary(summary, total, filename) {
   const highLen = total > 0 ? (summary.high / total) * circumference : 0;
   const medLen  = total > 0 ? (summary.medium / total) * circumference : 0;
   const lowLen  = total > 0 ? (summary.low / total) * circumference : 0;
+  const unscoredLen = total > 0 ? ((summary.unscored || 0) / total) * circumference : 0;
 
   const highOff = 0;
   const medOff  = highLen;
   const lowOff  = highLen + medLen;
+  const unscoredOff = highLen + medLen + lowLen;
 
   return `
     <div class="risk-summary">
@@ -166,6 +222,7 @@ function renderRiskSummary(summary, total, filename) {
           ${summary.high > 0 ? `<circle cx="50" cy="50" r="42" stroke="var(--risk-high)" stroke-dasharray="${highLen} ${circumference - highLen}" stroke-dashoffset="-${highOff}"></circle>` : ''}
           ${summary.medium > 0 ? `<circle cx="50" cy="50" r="42" stroke="var(--risk-medium)" stroke-dasharray="${medLen} ${circumference - medLen}" stroke-dashoffset="-${medOff}"></circle>` : ''}
           ${summary.low > 0 ? `<circle cx="50" cy="50" r="42" stroke="var(--risk-low)" stroke-dasharray="${lowLen} ${circumference - lowLen}" stroke-dashoffset="-${lowOff}"></circle>` : ''}
+          ${(summary.unscored || 0) > 0 ? `<circle cx="50" cy="50" r="42" stroke="var(--text-muted)" stroke-dasharray="${unscoredLen} ${circumference - unscoredLen}" stroke-dashoffset="-${unscoredOff}"></circle>` : ''}
         </svg>
         <div class="risk-donut-label">
           <div class="risk-donut-count">${total}</div>
@@ -185,6 +242,11 @@ function renderRiskSummary(summary, total, filename) {
           <span class="risk-badge-dot"></span>
           <span class="risk-badge-count">${summary.low}</span> Low Risk
         </div>
+        ${(summary.unscored || 0) > 0 ? `
+        <div class="risk-badge unscored">
+          <span class="risk-badge-dot"></span>
+          <span class="risk-badge-count">${summary.unscored}</span> Unscored
+        </div>` : ''}
       </div>
       <div class="filename-tag">📎 ${escapeHtml(filename)}</div>
     </div>
@@ -192,7 +254,8 @@ function renderRiskSummary(summary, total, filename) {
 }
 
 function renderClauseCard(score, index) {
-  const level = score.risk_level.toLowerCase();
+  const level = (score.risk_level || 'UNSCORED').toLowerCase();
+  const scoreLabel = level === 'unscored' ? 'Unscored' : `${score.score}/10 ${score.risk_level}`;
   const scoreIcon = level === 'high' ? '🔴' : level === 'medium' ? '🟡' : '🟢';
   const factors = (score.risk_factors || []).map(f => `• ${escapeHtml(f)}`).join('\n');
   const constraints = (score.constraint_violations || [])
@@ -206,8 +269,8 @@ function renderClauseCard(score, index) {
         <span class="clause-title">${escapeHtml(score.clause_title)}</span>
         <span class="clause-type-tag">${escapeHtml(score.clause_type || '')}</span>
         <span class="clause-score-pill ${level} score-reveal">
-          <span class="score-icon">${scoreIcon}</span>
-          ${score.score}/10 ${score.risk_level}
+          <span class="score-icon">${level === 'unscored' ? '' : scoreIcon}</span>
+          ${scoreLabel}
         </span>
         <span class="clause-expand-icon">▼</span>
       </div>
@@ -249,12 +312,18 @@ async function handleCompare() {
   btn.classList.add('loading');
   btn.textContent = 'Comparing…';
   btn.disabled = true;
+  const controller = new AbortController();
+  const clearTimers = startRequestTimers(loadingEl, controller);
 
   try {
     const form = new FormData();
     form.append('file_v1', v1File);
     form.append('file_v2', v2File);
-    const res = await fetch(`${API_BASE}/api/compare`, { method: 'POST', body: form });
+    const res = await fetch(`${API_BASE}/api/compare`, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || `Server error ${res.status}`);
@@ -265,8 +334,12 @@ async function handleCompare() {
     initComparisonRows(resultsEl);
   } catch (e) {
     loadingEl.innerHTML = '';
+    if (e.name === 'AbortError') {
+      e.message = 'Request timed out after 90 seconds. Try a smaller document pair.';
+    }
     errorEl.innerHTML = `<div class="error-box">⚠️ ${escapeHtml(e.message)}</div>`;
   } finally {
+    clearTimers();
     btn.classList.remove('loading');
     btn.textContent = 'Compare Versions';
     btn.disabled = false;

@@ -46,6 +46,27 @@ def test_splits_uppercase_title():
     clauses = chunk(_make_extraction(text))
     assert len(clauses) >= 2
 
+def test_no_heading_paragraph_fallback():
+    text = (
+        "The tenant shall maintain the premises in good repair and comply with all applicable laws. "
+        "This paragraph is intentionally long enough to be treated as a standalone fallback chunk. " * 2
+        + "\n\n"
+        + "The landlord may inspect the premises on reasonable notice and shall not interfere with use. "
+        "This second paragraph is also long enough to become a separate fallback chunk. " * 2
+    )
+    clauses = chunk(_make_extraction(text))
+    assert len(clauses) == 2
+
+def test_detects_alpha_numbered_clause_without_grouping():
+    text = (
+        "8. Indemnification\n\n" + "General indemnification text with enough padding for the garbage filter. " * 3 + "\n\n"
+        "8A. Third Party Claims\n\n" + "Third party claim process text with enough padding for the garbage filter. " * 3
+    )
+    clauses = chunk(_make_extraction(text))
+    clause_numbers = [c.clause_number for c in clauses]
+    assert '8' in clause_numbers
+    assert '8A' in clause_numbers
+
 
 # ── C3 — sub-clause grouping ──────────────────────────────────────────────────
 

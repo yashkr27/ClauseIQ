@@ -16,6 +16,7 @@ from ...comparator.comparator import compare
 from ...models.schemas import CompareResponse
 
 router = APIRouter()
+MAX_BYTES = 20 * 1024 * 1024
 
 @router.post("/api/compare", response_model=CompareResponse)
 async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = File(...)):
@@ -30,6 +31,12 @@ async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = Fi
             with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
                 shutil.copyfileobj(f.file, tmp)
                 paths.append(tmp.name)
+
+            file_size = os.path.getsize(paths[-1])
+            if file_size > MAX_BYTES:
+                raise HTTPException(status_code=400, detail="File exceeds 20 MB limit.")
+            if file_size == 0:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         # Rule M2: same pipeline for both docs, reusing Mode A logic blocks
         extraction_v1 = extract(paths[0])
@@ -56,6 +63,8 @@ async def compare_docs(file_v1: UploadFile = File(...), file_v2: UploadFile = Fi
         else:
             net_delta = 'UNCHANGED'
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
     finally:

@@ -145,7 +145,8 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
     # C-011: non-compete / non-solicitation / standstill > 12 months
     if any(w in text for w in ['non-compete', 'non-solicitation', 'noncompete',
                                 'nonsolicitation', 'standstill', 'stand-still',
-                                'non-solicit']):
+                                'non-solicit', 'non compete', 'non solicitation',
+                                'non solicit']):
         norm = _normalise_numeric_text(text)
         months = re.findall(r'(\d+)\s*month', norm)
         years  = re.findall(r'(\d+)\s*year', norm)
@@ -163,7 +164,7 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
 
     # C-013: no arbitration in dispute/governing law clause
     if any(w in title for w in ['dispute', 'governing', 'jurisdiction', 'resolution', 'law']) \
-       or any(w in text[:300] for w in ['governing law', 'jurisdiction', 'venue', 'courts of']):
+       or any(w in text[:300] for w in ['governing law', 'jurisdiction', 'venue', 'courts of', 'applicable law']):
         if 'arbitration' not in text and 'arbitrate' not in text:
             violations.append('C-013')
             min_score = max(min_score, 6)
@@ -217,6 +218,43 @@ def _score_level(score: int) -> str:
     if score <= 3:  return 'LOW'
     if score <= 6:  return 'MEDIUM'
     return 'HIGH'
+
+
+def _baseline_score(clause: Clause) -> tuple[int, list[str], str]:
+    """
+    Fast non-LLM baseline for clauses that do not trigger firm constraints.
+    Use enrich=True for semantic LLM detail.
+    """
+    text = clause.text.lower()
+    score = 2
+    factors = ["No firm constraint triggered."]
+
+    if 'indemnif' in text and 'mutual' not in text:
+        score = max(score, 4)
+        factors.append("Indemnity language should be reviewed for one-sided allocation.")
+
+    if 'auto-renew' in text or 'automatic renewal' in text:
+        days = [int(d) for d in re.findall(r'(\d+)\s*day', text)]
+        if days and min(days) < 90:
+            score = max(score, 5)
+            factors.append("Auto-renewal opt-out window is shorter than 90 days.")
+
+    if 'liquidated damages' in text or 'penalty' in text:
+        score = max(score, 5)
+        factors.append("Liquidated damages or penalty language requires proportionality review.")
+
+    if 'personal guarantee' in text or 'guarantor' in text:
+        score = max(score, 7)
+        factors.append("Personal guarantee language can create high individual exposure.")
+
+    if score <= 3:
+        recommendation = "No immediate firm-policy issue detected; review in ordinary course."
+    elif score <= 6:
+        recommendation = "Review commercially and confirm the allocation is acceptable."
+    else:
+        recommendation = "Escalate for legal review before accepting this clause."
+
+    return score, factors, recommendation
 
 
 def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> RiskScore:
@@ -273,27 +311,32 @@ def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> Ris
             source = "hybrid"
             
     else:
-        # No constraints triggered — standard LLM semantic scoring
-        prompt = _build_prompt(clause, nodes)
-        hashed_user = hashlib.sha256(b"clauseiq-anonymous-user").hexdigest()
-        client = _get_anthropic_client()
-        model_name = _get_model_name(client)
-        response = _call_llm(client, model_name, prompt, hashed_user)
-        
-        raw = response.content[0].text.strip()
-        raw = re.sub(r'^```json\s*|```$', '', raw, flags=re.MULTILINE).strip()
-        data = json.loads(raw)
-        
-        llm_score_raw = data.get('score')
-        if llm_score_raw is None:
-            final_score = 0
-            risk_level = 'UNSCORED'
-        else:
-            final_score = max(1, min(10, int(llm_score_raw)))
+        # No constraints triggered - use fast baseline unless enrichment is requested.
+        if not enrich:
+            final_score, risk_factors, recommendation = _baseline_score(clause)
             risk_level = _score_level(final_score)
-        risk_factors = data.get('risk_factors', [])
-        recommendation = data.get('recommendation', '')
-        source = "llm"
+            source = "deterministic"
+        else:
+            prompt = _build_prompt(clause, nodes)
+            hashed_user = hashlib.sha256(b"clauseiq-anonymous-user").hexdigest()
+            client = _get_anthropic_client()
+            model_name = _get_model_name(client)
+            response = _call_llm(client, model_name, prompt, hashed_user)
+
+            raw = response.content[0].text.strip()
+            raw = re.sub(r'^```json\s*|```$', '', raw, flags=re.MULTILINE).strip()
+            data = json.loads(raw)
+
+            llm_score_raw = data.get('score')
+            if llm_score_raw is None:
+                final_score = 0
+                risk_level = 'UNSCORED'
+            else:
+                final_score = max(1, min(10, int(llm_score_raw)))
+                risk_level = _score_level(final_score)
+            risk_factors = data.get('risk_factors', [])
+            recommendation = data.get('recommendation', '')
+            source = "llm"
 
     # Construct the resulting RiskScore
     result = RiskScore(
@@ -349,8 +392,14 @@ def compute_risk_delta(scores_v1: list[RiskScore],
                 'score_v2': s2,
             })
         elif s2 is not None:
-            r = r.model_copy(update={'risk_delta': 'N/A', 'score_v2': s2})
+            r = r.model_copy(update={
+                'risk_delta': 'INCREASED' if s2 >= 7 else 'UNCHANGED',
+                'score_v2': s2,
+            })
         elif s1 is not None:
-            r = r.model_copy(update={'risk_delta': 'N/A', 'score_v1': s1})
+            r = r.model_copy(update={
+                'risk_delta': 'DECREASED' if s1 >= 7 else 'UNCHANGED',
+                'score_v1': s1,
+            })
         updated.append(r)
     return updated

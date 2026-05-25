@@ -19,10 +19,10 @@
       <div class="logo-text">Clause<span>IQ</span></div>
     </div>
     <nav class="tab-nav" role="tablist">
-      <button class="tab-btn active" role="tab" data-tab="analyse" id="tab-analyse" aria-selected="true">
+      <button class="tab-btn active" role="tab" data-tab="analyse" id="tab-analyse" aria-selected="true" aria-label="Analyse">
         ⚡ Analyse
       </button>
-      <button class="tab-btn" role="tab" data-tab="compare" id="tab-compare" aria-selected="false">
+      <button class="tab-btn" role="tab" data-tab="compare" id="tab-compare" aria-selected="false" aria-label="Compare">
         🔀 Compare
       </button>
     </nav>
@@ -37,6 +37,7 @@
         <div class="upload-label">Drop your contract here</div>
         <div class="upload-hint">PDF or DOCX • Max 20 MB</div>
         <div class="upload-filename" id="analyse-filename"></div>
+        <button class="upload-reset" id="analyse-reset" hidden>Clear</button>
         <input type="file" id="analyse-file-input" accept=".pdf,.docx,.doc">
       </div>
     </div>
@@ -63,6 +64,7 @@
         <div class="upload-label">Drop original contract</div>
         <div class="upload-hint">PDF or DOCX</div>
         <div class="upload-filename" id="v1-filename"></div>
+        <button class="upload-reset" id="v1-reset" hidden>Clear</button>
         <input type="file" id="v1-file-input" accept=".pdf,.docx,.doc">
       </div>
       <div class="upload-zone" id="upload-v2" tabindex="0">
@@ -71,6 +73,7 @@
         <div class="upload-label">Drop revised contract</div>
         <div class="upload-hint">PDF or DOCX</div>
         <div class="upload-filename" id="v2-filename"></div>
+        <button class="upload-reset" id="v2-reset" hidden>Clear</button>
         <input type="file" id="v2-file-input" accept=".pdf,.docx,.doc">
       </div>
     </div>

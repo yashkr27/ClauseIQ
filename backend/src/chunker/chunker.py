@@ -12,10 +12,12 @@ from ..models.schemas import Clause, ClauseType
 
 
 # ── boundary patterns (C1) ────────────────────────────────────────────────────
-# These are the ONLY valid split points. No paragraph splitting. No token limits.
+# These are the primary split points. Paragraph fallback only runs if no headings exist.
 # Added optional leading whitespace support [ \t]* for robustness.
 
 _BOUNDARY_PATTERNS = [
+    re.compile(r'^[ \t]*(\d+(?:\([a-zA-Z0-9]+\))+)\.?\s+([A-Z][^\n]{0,200})$', re.MULTILINE),  # 5(a)(i)
+    re.compile(r'^[ \t]*(\d+[A-Z])\.?\s+([A-Z][^\n]{0,200})$', re.MULTILINE),       # 8A
     re.compile(r'^[ \t]*(\d+\.\d+)\.?\s+([A-Z][^\n]{0,200})$', re.MULTILINE),   # decimal sub
     re.compile(r'^[ \t]*(\d+)\.?\s+([A-Z][^\n]{0,200})$', re.MULTILINE),         # integer
     re.compile(r'^[ \t]*([A-Z]{4,}(?:\s+[A-Z]+){0,6})\s*$', re.MULTILINE),      # UPPERCASE
@@ -39,6 +41,8 @@ def _normalise_number(raw: str) -> str:
 
 def _parent_number(normalised: str) -> str:
     """"3.1" → "3",  "3" → "" """
+    if re.match(r'^\d+(?:\([a-zA-Z0-9]+\))+$', normalised):
+        return re.match(r'^\d+', normalised).group(0)
     parts = normalised.split('.')
     return parts[0] if len(parts) > 1 else ''
 
@@ -102,6 +106,34 @@ def _clean_title(number: str, raw_title: str) -> str:
 
 
 # ── boundary finding ──────────────────────────────────────────────────────────
+
+def _paragraph_fallback(text: str) -> list[Clause]:
+    """
+    Structured fallback for contracts with no detectable headings.
+    It keeps chunks at paragraph boundaries and only activates after the legal
+    boundary detector fails, so normal contracts still use clause headings.
+    """
+    paragraphs = [
+        p.strip()
+        for p in re.split(r'\n\s*\n+', text)
+        if len(p.strip()) >= 200
+    ]
+    if len(paragraphs) < 2:
+        return []
+
+    clauses = []
+    for idx, para in enumerate(paragraphs):
+        first_line = para.split('\n', 1)[0][:80]
+        clause_number = str(idx + 1)
+        clauses.append(Clause(
+            chunk_index=idx,
+            clause_number=clause_number,
+            clause_title=_clean_title(clause_number, first_line),
+            clause_type=_detect_type(first_line, para),
+            text=para,
+        ))
+    return clauses
+
 
 def _find_boundaries(text: str) -> list[dict]:
     """
@@ -193,6 +225,10 @@ def chunk(extraction: ExtractionResult) -> list[Clause]:
     boundaries = _find_boundaries(text)
 
     if not boundaries:
+        fallback_clauses = _paragraph_fallback(text)
+        if fallback_clauses:
+            return fallback_clauses
+
         # No headings found — return entire text as one chunk (graceful degradation)
         return [Clause(
             chunk_index=0,
@@ -219,6 +255,11 @@ def chunk(extraction: ExtractionResult) -> list[Clause]:
 
     # Filter garbage chunks (Fix 2): addresses, signatures, boilerplate
     grouped = [c for c in grouped if not _is_garbage(c)]
+
+    if not grouped:
+        fallback_clauses = _paragraph_fallback(text)
+        if fallback_clauses:
+            return fallback_clauses
 
     # Build Clause objects with type tagging (C4)
     clauses = []
