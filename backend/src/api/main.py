@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -7,8 +10,6 @@ from .routes.compare import router as compare_router
 from ..scorer.knowledge import load_knowledge_nodes
 import os
 
-from dotenv import load_dotenv
-load_dotenv()
 
 app = FastAPI(title="ClauseIQ API", version="1.0.0")
 
