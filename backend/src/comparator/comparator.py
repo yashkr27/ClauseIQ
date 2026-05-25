@@ -7,6 +7,7 @@ Output: list[ComparisonResult]
 """
 
 import re
+import json
 import difflib
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -181,7 +182,7 @@ def compare(clauses_v1: list[Clause], clauses_v2: list[Clause]) -> list[Comparis
             clause_number_v2=c2.clause_number,
             clause_title=c1.clause_title or c2.clause_title,
             similarity_score=round(sim, 3),
-            diff_text=str(diff) if diff else None,
+            diff_text=json.dumps(diff) if diff else None,
             risk_delta=None, score_v1=None, score_v2=None,
         ))
 
@@ -198,7 +199,7 @@ def compare(clauses_v1: list[Clause], clauses_v2: list[Clause]) -> list[Comparis
             clause_number_v2=c2.clause_number,
             clause_title=c1.clause_title or c2.clause_title,
             similarity_score=round(sim, 3),
-            diff_text=str(diff),
+            diff_text=json.dumps(diff),
             risk_delta=None, score_v1=None, score_v2=None,
         ))
         semantic_v1_matched.add(c1.clause_number)

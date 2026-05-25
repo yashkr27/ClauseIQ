@@ -338,17 +338,16 @@ function renderComparisonRow(c, index) {
   `;
 }
 
-function renderDiffText(text) {
-  if (!text) return '';
-  return text.split('\n').map(line => {
-    if (line.startsWith('+ ') || line.startsWith('+\t')) {
-      return `<span class="diff-added">${escapeHtml(line)}</span>`;
-    }
-    if (line.startsWith('- ') || line.startsWith('-\t')) {
-      return `<span class="diff-removed">${escapeHtml(line)}</span>`;
-    }
-    return escapeHtml(line);
-  }).join('\n');
+function renderDiffText(raw) {
+  if (!raw) return '';
+  let ops;
+  try { ops = JSON.parse(raw); } catch { return escapeHtml(raw); }
+  return ops.map(op => {
+    const t = escapeHtml(op.text || '');
+    if (op.type === 'add')    return `<span class="diff-added">${t} </span>`;
+    if (op.type === 'remove') return `<span class="diff-removed">${t} </span>`;
+    return t + ' ';
+  }).join('');
 }
 
 function initComparisonRows(container) {

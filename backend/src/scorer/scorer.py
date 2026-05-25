@@ -96,11 +96,11 @@ def _call_llm(client, model_name: str, prompt: str, hashed_user: str) -> Bedrock
         error_msg = str(e)
         if hasattr(e, "response") and isinstance(e.response, dict) and "Error" in e.response:
             error_msg = e.response["Error"].get("Message", error_msg)
-        # Graceful fallback: return a low-risk fallback JSON to keep pipelines stable
+        # Graceful fallback: return UNSCORED sentinel so the caller can detect the failure
         fallback_json = json.dumps({
-            "score": 3,
-            "risk_factors": [f"Bedrock fallback triggered (Error: {error_msg})"],
-            "recommendation": "Verify contract details manually. Bedrock service was unavailable during scoring."
+            "score": None,
+            "risk_factors": [f"Scoring unavailable (Bedrock error: {error_msg})"],
+            "recommendation": "Manual review required \u2014 risk scoring service was unavailable."
         })
         return BedrockResponse(fallback_json)
 
@@ -213,6 +213,7 @@ Reference specific firm knowledge node IDs (e.g. C-010) when they apply."""
 
 
 def _score_level(score: int) -> str:
+    if score == 0:  return 'UNSCORED'
     if score <= 3:  return 'LOW'
     if score <= 6:  return 'MEDIUM'
     return 'HIGH'
@@ -283,9 +284,13 @@ def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> Ris
         raw = re.sub(r'^```json\s*|```$', '', raw, flags=re.MULTILINE).strip()
         data = json.loads(raw)
         
-        llm_score = max(1, min(10, int(data.get('score', 5))))
-        final_score = llm_score
-        risk_level = _score_level(final_score)
+        llm_score_raw = data.get('score')
+        if llm_score_raw is None:
+            final_score = 0
+            risk_level = 'UNSCORED'
+        else:
+            final_score = max(1, min(10, int(llm_score_raw)))
+            risk_level = _score_level(final_score)
         risk_factors = data.get('risk_factors', [])
         recommendation = data.get('recommendation', '')
         source = "llm"
