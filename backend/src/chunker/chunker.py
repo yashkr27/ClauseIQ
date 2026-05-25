@@ -38,13 +38,13 @@ _BOUNDARY_PATTERNS = [
 
     # 3.1
     re.compile(
-        r'^[ \t]*(\d+\.\d+)\.?\s+([^\n]{3,200})$',
+        r'^[ \t]*(\d+\.\d+)\.?\s+([A-Z][A-Za-z\s&,\-/]{2,80})$',
         re.MULTILINE
     ),
 
     # 7
     re.compile(
-        r'^[ \t]*(\d+)\.?\s+([^\n]{3,200})$',
+        r'^[ \t]*(\d+)\.?\s+([A-Z][A-Za-z\s&,\-/]{2,80})$',
         re.MULTILINE
     ),
 
@@ -463,6 +463,18 @@ def _find_boundaries(text: str) -> list[dict]:
 
 def _group_sub_clauses(raw_chunks: list[dict]) -> list[dict]:
 
+    """
+    Merge ONLY true child clauses:
+        3.1 -> 3
+        3.2 -> 3
+
+    NEVER merge:
+        7 -> 8
+        8 -> 9
+
+    NEVER merge large standalone clauses.
+    """
+
     grouped = []
 
     i = 0
@@ -471,54 +483,60 @@ def _group_sub_clauses(raw_chunks: list[dict]) -> list[dict]:
 
         chunk = raw_chunks[i]
 
-        parent_num = _parent_number(chunk['number'])
+        current_number = chunk["number"]
 
-        if not parent_num:
-
-            combined_text = chunk['text']
-
-            j = i + 1
-
-            while j < len(raw_chunks):
-
-                next_chunk = raw_chunks[j]
-
-                next_parent = _parent_number(next_chunk['number'])
-
-                if (
-                    next_parent
-                    and next_parent == chunk['number']
-                ):
-
-                    if len(combined_text) <= 800:
-
-                        combined_text += (
-                            '\n\n'
-                            + next_chunk['title']
-                            + '\n'
-                            + next_chunk['text']
-                        )
-
-                        j += 1
-
-                    else:
-                        break
-
-                else:
-                    break
-
-            grouped.append({
-                **chunk,
-                'text': combined_text
-            })
-
-            i = j
-
-        else:
+        # only top-level numeric clauses can absorb children
+        if not re.match(r'^\d+$', current_number):
 
             grouped.append(chunk)
 
             i += 1
+
+            continue
+
+        combined_text = chunk["text"]
+
+        j = i + 1
+
+        while j < len(raw_chunks):
+
+            next_chunk = raw_chunks[j]
+
+            next_number = next_chunk["number"]
+
+            # STRICT CHILD CHECK
+            #
+            # allowed:
+            #   7.1 under 7
+            #   7.2 under 7
+            #
+            # forbidden:
+            #   8 under 7
+            #   10 under 7
+            #
+
+            if not next_number.startswith(current_number + "."):
+                break
+
+            # prevent gigantic merged clauses
+            if len(combined_text) > 1200:
+                break
+
+            combined_text += (
+                "\n\n"
+                + next_chunk["title"]
+                + "\n"
+                + next_chunk["text"]
+            )
+
+            j += 1
+
+        grouped.append({
+            **chunk,
+            "text": combined_text
+        })
+
+        i = j if j > i + 1 else i + 1
 
     return grouped
 
