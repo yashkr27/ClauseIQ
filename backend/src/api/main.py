@@ -4,8 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from .routes.analyse import router as analyse_router
 from .routes.compare import router as compare_router
-from .scorer.knowledge import load_knowledge_nodes
-from .db import db_available
+from ..scorer.knowledge import load_knowledge_nodes
 import os
 
 from dotenv import load_dotenv
