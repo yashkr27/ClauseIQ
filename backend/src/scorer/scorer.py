@@ -171,6 +171,29 @@ def _check_constraints(clause: Clause, nodes: list[dict]) -> tuple[int, list[str
                 violations.append('C-014')
                 min_score = max(min_score, 6)
 
+    # AP-010: one-sided indemnification
+    if 'indemnif' in text and 'mutual' not in text and 'both parties' not in text:
+        violations.append('AP-010')
+        min_score = max(min_score, 6)
+
+    # AP-011: auto-renewal with short opt-out window
+    if 'auto-renew' in text or 'automatic renewal' in text:
+        days = [int(d) for d in re.findall(r'(\d+)\s*day', text)]
+        if days and min(days) < 90:
+            violations.append('AP-011')
+            min_score = max(min_score, 6)
+
+    # D-010: NDA/confidentiality clause missing return-of-materials obligation
+    if any(w in text for w in ['confidential', 'non-disclosure', 'nda']):
+        if 'return' not in text and 'destroy' not in text and 'destruction' not in text:
+            violations.append('D-010')
+            min_score = max(min_score, 5)
+
+    # D-011: disproportionate liquidated damages / penalty clause
+    if 'liquidated damages' in text or ('penalty' in text and 'breach' in text):
+        violations.append('D-011')
+        min_score = max(min_score, 5)
+
     return min_score, violations
 
 
@@ -344,7 +367,7 @@ def score_clause(clause: Clause, nodes: list[dict], enrich: bool = False) -> Ris
     )
 
 
-def score_document(clauses: list[Clause], enrich: bool = False) -> list[RiskScore]:
+def score_document(clauses: list[Clause], enrich: bool = True) -> list[RiskScore]:
     """Score all clauses. Rule SB1: loads knowledge nodes automatically."""
     nodes = load_knowledge_nodes()
     return [score_clause(c, nodes, enrich=enrich) for c in clauses]
@@ -383,3 +406,69 @@ def compute_risk_delta(scores_v1: list[RiskScore],
             })
         updated.append(r)
     return updated
+
+
+# ── Negotiation suggestions (Innovation) ──────────────────────────────────────
+
+_NEGOTIATION_ACTIONS: dict[str, str] = {
+    'C-010': "Counter: insist on liability cap at 2× annual contract value.",
+    'C-011': "Counter: reduce non-compete / non-solicitation duration to 12 months maximum.",
+    'C-012': "Counter: add explicit carve-out for pre-existing IP before signing.",
+    'C-013': "Restore: re-insert arbitration clause (SIAC or LCIA rules preferred).",
+    'C-014': "Counter: extend termination-for-convenience notice to minimum 90 days.",
+    'AP-010': "Counter: replace one-sided indemnity with mutual indemnification.",
+    'AP-011': "Counter: extend auto-renewal opt-out window to minimum 90 days.",
+    'D-010': "Add: include clause requiring return or certified destruction of confidential materials on termination.",
+    'D-011': "Revise: ensure liquidated damages amount is proportionate to estimated actual loss.",
+}
+
+
+def suggest_negotiation(comparison_results: list,
+                        scores_v1: list[RiskScore],
+                        scores_v2: list[RiskScore]) -> list[dict]:
+    """
+    Combines comparison results + constraint violations into plain-English
+    negotiation actions. Only surfaces clauses that changed and have at least
+    one triggered CONSTRAINT or ANTI_PATTERN node.
+
+    Returns list[dict] matching NegotiationSuggestion schema.
+    """
+    nodes = load_knowledge_nodes()
+    node_map = {n['id']: n for n in nodes}
+
+    v2_score_map = {s.clause_number: s for s in scores_v2}
+    v1_score_map = {s.clause_number: s for s in scores_v1}
+
+    suggestions: list[dict] = []
+    seen: set[tuple[str, str]] = set()  # (clause_ref, constraint_id) dedup
+
+    for r in comparison_results:
+        if r.match_type == 'UNCHANGED':
+            continue
+
+        # Prefer v2 score; fall back to v1 for REMOVED clauses
+        score = v2_score_map.get(r.clause_number_v2) or v1_score_map.get(r.clause_number_v1)
+        if not score or not score.constraint_violations:
+            continue
+
+        clause_ref = r.clause_number_v2 or r.clause_number_v1 or ''
+
+        for cid in score.constraint_violations:
+            key = (clause_ref, cid)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            node = node_map.get(cid, {})
+            action = _NEGOTIATION_ACTIONS.get(cid, node.get('content', 'Review required.'))
+
+            suggestions.append({
+                'clause_number': clause_ref,
+                'clause_title':  r.clause_title,
+                'action':        action,
+                'reason':        node.get('title', cid),
+                'constraint_id': cid,
+                'risk_delta':    r.risk_delta,
+            })
+
+    return suggestions

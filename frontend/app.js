@@ -205,13 +205,13 @@ function renderAnalyseResults(data) {
 function renderRiskSummary(summary, total, filename) {
   const circumference = 2 * Math.PI * 42;
   const highLen = total > 0 ? (summary.high / total) * circumference : 0;
-  const medLen  = total > 0 ? (summary.medium / total) * circumference : 0;
-  const lowLen  = total > 0 ? (summary.low / total) * circumference : 0;
+  const medLen = total > 0 ? (summary.medium / total) * circumference : 0;
+  const lowLen = total > 0 ? (summary.low / total) * circumference : 0;
   const unscoredLen = total > 0 ? ((summary.unscored || 0) / total) * circumference : 0;
 
   const highOff = 0;
-  const medOff  = highLen;
-  const lowOff  = highLen + medLen;
+  const medOff = highLen;
+  const lowOff = highLen + medLen;
   const unscoredOff = highLen + medLen + lowLen;
 
   return `
@@ -347,16 +347,18 @@ async function handleCompare() {
 }
 
 function renderCompareResults(data) {
-  const { comparison, net_delta } = data;
+  const { comparison, net_delta, suggestions = [] } = data;
   const deltaClass = net_delta.toLowerCase();
   const deltaIcon = net_delta === 'INCREASED' ? '📈' : net_delta === 'DECREASED' ? '📉' : '➖';
 
   const stats = {
     unchanged: comparison.filter(c => c.match_type === 'UNCHANGED').length,
-    modified:  comparison.filter(c => c.match_type === 'MODIFIED').length,
-    added:     comparison.filter(c => c.match_type === 'ADDED').length,
-    removed:   comparison.filter(c => c.match_type === 'REMOVED').length,
+    modified: comparison.filter(c => c.match_type === 'MODIFIED').length,
+    added: comparison.filter(c => c.match_type === 'ADDED').length,
+    removed: comparison.filter(c => c.match_type === 'REMOVED').length,
   };
+
+  const negotiationHtml = suggestions.length ? renderNegotiationPanel(suggestions) : '';
 
   return `
     <div class="compare-header">
@@ -370,10 +372,49 @@ function renderCompareResults(data) {
         <div class="risk-badge high"><span class="risk-badge-dot"></span><span class="risk-badge-count">${stats.removed}</span> Removed</div>
       </div>
     </div>
+    ${negotiationHtml}
     <div class="comparison-list">
       ${comparison.map((c, i) => renderComparisonRow(c, i)).join('')}
     </div>
   `;
+}
+
+function renderNegotiationPanel(suggestions) {
+  // Group by constraint_id so we don't repeat the same action for multiple clauses
+  const byConstraint = {};
+  for (const s of suggestions) {
+    if (!byConstraint[s.constraint_id]) byConstraint[s.constraint_id] = [];
+    byConstraint[s.constraint_id].push(s);
+  }
+
+  const rows = Object.entries(byConstraint).map(([cid, items]) => {
+    const first = items[0];
+    const clauseRefs = items
+      .map(i => i.clause_number ? `<span class="neg-clause-ref">${escapeHtml(i.clause_number)}</span>` : '')
+      .filter(Boolean).join(' ');
+    const deltaIcon = first.risk_delta === 'INCREASED' ? '▲' :
+      first.risk_delta === 'DECREASED' ? '▼' : '';
+    return `
+      <div class="neg-row">
+        <div class="neg-header">
+          <span class="neg-constraint-badge">${escapeHtml(cid)}</span>
+          ${clauseRefs}
+          ${deltaIcon ? `<span class="neg-delta ${first.risk_delta.toLowerCase()}">${deltaIcon}</span>` : ''}
+        </div>
+        <p class="neg-reason">${escapeHtml(first.reason)}</p>
+        <p class="neg-action">${escapeHtml(first.action)}</p>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="negotiation-panel">
+      <div class="negotiation-panel-header">
+        <span class="neg-icon">⚖️</span>
+        <strong>Negotiation Actions</strong>
+        <span class="neg-count">${suggestions.length} item${suggestions.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="neg-rows">${rows}</div>
+    </div>`;
 }
 
 function renderComparisonRow(c, index) {
@@ -417,7 +458,7 @@ function renderDiffText(raw) {
   try { ops = JSON.parse(raw); } catch { return escapeHtml(raw); }
   return ops.map(op => {
     const t = escapeHtml(op.text || '');
-    if (op.type === 'add')    return `<span class="diff-added">${t} </span>`;
+    if (op.type === 'add') return `<span class="diff-added">${t} </span>`;
     if (op.type === 'remove') return `<span class="diff-removed">${t} </span>`;
     return t + ' ';
   }).join('');

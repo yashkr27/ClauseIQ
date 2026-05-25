@@ -60,5 +60,18 @@ class AnalyseResponse(BaseModel):
     risk_summary: RiskSummary
 
 class CompareResponse(BaseModel):
-    comparison: list[ComparisonResult]
-    net_delta:  str    # INCREASED | DECREASED | UNCHANGED (rule M3)
+    comparison:   list[ComparisonResult]
+    net_delta:    str    # INCREASED | DECREASED | UNCHANGED (rule M3)
+    suggestions:  list['NegotiationSuggestion'] = []
+
+
+class NegotiationSuggestion(BaseModel):
+    clause_number: Optional[str]
+    clause_title:  str
+    action:        str
+    reason:        str
+    constraint_id: str
+    risk_delta:    Optional[str]
+
+
+CompareResponse.model_rebuild()
