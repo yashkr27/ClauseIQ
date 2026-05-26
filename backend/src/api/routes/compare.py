@@ -7,9 +7,11 @@ Rule F5: API shape is fixed, frontend adapts
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 import tempfile
+
 import os
 import shutil
 
+from ...extraction.cleaner import clean
 from ...extraction.extractor import extract
 from ...chunker.chunker import chunk
 from ...scorer.scorer import (
@@ -219,7 +221,10 @@ async def compare_docs(
         # Same pipeline for both documents
         # ─────────────────────────────────────────────────────────────
         extraction_v1 = extract(paths[0])
+        extraction_v1 = clean(extraction_v1)
+        
         extraction_v2 = extract(paths[1])
+        extraction_v2 = clean(extraction_v2)
 
         clauses_v1 = chunk(extraction_v1)
         clauses_v2 = chunk(extraction_v2)

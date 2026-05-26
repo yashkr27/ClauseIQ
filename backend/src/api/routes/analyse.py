@@ -8,6 +8,7 @@ import tempfile
 import os
 import shutil
 
+from ...extraction.cleaner import clean
 from ...extraction.extractor import extract
 from ...chunker.chunker import chunk
 from ...scorer.scorer import score_document
@@ -25,7 +26,7 @@ def _persist_analyse(filename: str, extraction, clauses, scores):
 
         # 1. documents
         doc_row = client.table("documents").insert({
-            "filename": filename,
+            "filename":     filename,
             "content_text": extraction.text[:5000]
         }).execute().data[0]
         doc_id = doc_row["id"]
@@ -41,14 +42,14 @@ def _persist_analyse(filename: str, extraction, clauses, scores):
                 "clause_type":   c.clause_type,
                 "text":          c.text,
             }).execute().data[0]
-            chunk_id_map[c.chunk_index] = row["id"]  # ← real UUID
+            chunk_id_map[c.chunk_index] = row["id"]
 
         # 3. risk_scores — use UUID not chunk_index
         for s in scores:
             chunk_uuid = chunk_id_map.get(s.chunk_index)
             if chunk_uuid:
                 client.table("risk_scores").insert({
-                    "chunk_id":              chunk_uuid,  # ← fixed
+                    "chunk_id":              chunk_uuid,
                     "score":                 s.score,
                     "risk_factors":          s.risk_factors,
                     "constraint_violations": s.constraint_violations,
@@ -78,6 +79,7 @@ async def analyse(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         extraction = extract(tmp_path)
+        extraction = clean(extraction)      # ← strip watermarks / boilerplate
         clauses    = chunk(extraction)
         scores     = score_document(clauses)
 

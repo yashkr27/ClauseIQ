@@ -1,191 +1,47 @@
 """
-Layer 1 — Extraction
+Layer 1 — Extraction (v2)
 Rules satisfied: A2, A5, E1, E2, E3
 
 Public interface:
     extract(file_path: str) -> ExtractionResult
 
 ExtractionResult:
-    text     : str        # clean full text, headings preserved (E1)
-    headings : list[dict] # [{number, title, char_offset}] for chunker
-    file_type: str        # "pdf" | "docx"
-    pages    : int        # page count (pdf) or 1 (docx)
+    text       : str         # full markdown (page markers embedded)
+    markdown   : str         # alias for text
+    headings   : list[dict]  # kept for backward compat — now empty (Gemini chunks instead)
+    file_type  : str         # "pdf" | "docx"
+    pages      : int         # page count from LlamaParse
+    page_texts : list[dict]  # [{"page": 1, "text": "...", "char_start": N, "char_end": M}]
+
+Pipeline:
+    LlamaParse (primary) → structured markdown per page → page markers embedded
+    PyMuPDF   (fallback) → plain text if LlamaParse unavailable
 """
 
-import re
 import os
-import sys
+import re
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Windows: point pytesseract at the installed binary if not on PATH
-if sys.platform == 'win32':
-    import pytesseract
-    _tess = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    if Path(_tess).exists():
-        pytesseract.pytesseract.tesseract_cmd = _tess
 
-
-# ── output type ───────────────────────────────────────────────────────────────
+# ── Output type ───────────────────────────────────────────────────────────────
 
 @dataclass
 class ExtractionResult:
-    text: str
-    headings: list
-    file_type: str
-    pages: int
+    text:       str              # full text with <!-- PAGE N --> markers
+    markdown:   str              # same as text (alias for Gemini chunker)
+    headings:   list             # kept for backward compat — now always []
+    file_type:  str
+    pages:      int
+    page_texts: list = field(default_factory=list)
+    # [{"page": int, "text": str, "char_start": int, "char_end": int}]
 
 
-# ── noise patterns (E3) ───────────────────────────────────────────────────────
-# These PDFs are browser-printed: every page has a timestamp header and URL footer.
+# ── In-memory cache ───────────────────────────────────────────────────────────
 
-_NOISE_PATTERNS = [
-    re.compile(r'^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s+(AM|PM)\s*.*$', re.MULTILINE),
-    # Use .+ (not \S+) because OCR introduces spaces inside long URLs
-    re.compile(r'^https?://.+$', re.MULTILINE),
-    re.compile(r'^Page\s+\d+\s+of\s+\d+\s*$', re.MULTILINE | re.IGNORECASE),
-    # Standalone page fraction lines produced by browser-print OCR: "1/6", "5/6"
-    re.compile(r'^\d+/\d+\s*$', re.MULTILINE),
-]
+_EXTRACTION_CACHE: dict = {}
 
-def _strip_noise(text: str) -> str:
-    for pattern in _NOISE_PATTERNS:
-        text = pattern.sub('', text)
-    # Collapse multiple consecutive horizontal spaces to a single space
-    text = re.sub(r'[ \t]+', ' ', text)
-    # collapse 3+ consecutive blank lines to 2
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
-
-# ── heading detection (E1) ────────────────────────────────────────────────────
-# Detects both styles present in our NDAs:
-#   v1: "1.", "2.", "3." (flat integers)
-#   v2: "1.0", "2.0", "3.1" (decimal)
-# Also catches: "ARTICLE IV", "SCHEDULE A", UPPERCASE TITLE LINES
-
-_HEADING_PATTERNS = [
-    # nested subclauses: "5(a)(i) Confidential Information" or "5(b) Return of Materials"
-    re.compile(r'^[ \t]*(\d+(?:\([a-zA-Z0-9]+\))+)\s+([A-Z][^\n]{2,200})$', re.MULTILINE),
-    # decimal: "3.1 Title" or "3.1. Title"
-    re.compile(r'^[ \t]*(\d+\.\d+)\.?\s+([A-Z][^\n]{2,200})$', re.MULTILINE),
-    # integer: "3. Title" or "3 Title" (at line start, followed by uppercase)
-    re.compile(r'^[ \t]*(\d+)\.?\s+([A-Z][^\n]{2,200})$', re.MULTILINE),
-    # ALL CAPS section titles (min 4 chars, standalone line)
-    re.compile(r'^[ \t]*([A-Z]{4,}(?:\s+[A-Z]+){0,5})$', re.MULTILINE),
-    # Title Case section headings: 1–6 words, each capitalised, 4–50 chars total
-    # Matches: "Background", "Operative Terms", "Confidentiality", "Return of Materials"
-    re.compile(r'^[ \t]*([A-Z][a-z]{2,}(?:\s+(?:of\s+)?[A-Z][a-z]{1,})*)$', re.MULTILINE),
-    # "SCHEDULE A" / "ANNEXURE 1"
-    re.compile(r'^[ \t]*(SCHEDULE\s+[A-Z0-9]+|ANNEXURE\s+[A-Z0-9]+)$', re.MULTILINE),
-]
-
-def _extract_headings(text: str) -> list:
-    """
-    Returns list of dicts: {number, title, char_offset}
-    number is empty string for UPPERCASE-only headings.
-    """
-    headings = []
-    seen_offsets = set()
-
-    for pattern in _HEADING_PATTERNS:
-        for m in pattern.finditer(text):
-            offset = m.start()
-            if offset in seen_offsets:
-                continue
-            seen_offsets.add(offset)
-
-            groups = m.groups()
-            if len(groups) == 2:
-                number, title = groups
-            else:
-                number, title = '', groups[0]
-
-            headings.append({
-                'number': number.strip(),
-                'title': title.strip(),
-                'char_offset': offset,
-            })
-
-    headings.sort(key=lambda h: h['char_offset'])
-    return headings
-
-
-# ── PDF extraction (A5) ───────────────────────────────────────────────────────
-
-def _extract_pdf(file_path: str) -> tuple[str, int]:
-    """
-    Hybrid PDF extraction:
-    1. Try PyMuPDF (fitz) first. If it returns substantial text, use it (extremely fast!).
-    2. Fallback to OCR pipeline (pdf2image → pytesseract) if PyMuPDF returns empty/insufficient text.
-    """
-    import fitz  # PyMuPDF
-
-    doc = None
-    try:
-        doc = fitz.open(file_path)
-        page_count = len(doc)
-        text_parts = []
-        for page in doc:
-            text_parts.append(page.get_text())
-        doc_text = '\n'.join(text_parts).strip()
-        
-        # If we got substantial text, use it directly (rule A5 bypass check: vector-drawn PDFs
-        # return empty strings here, so they will correctly fall back to OCR).
-        if len(doc_text) >= 100:
-            doc.close()
-            return doc_text, page_count
-    except Exception:
-        # Gracefully handle any issues opening with PyMuPDF and fallback to OCR
-        pass
-    finally:
-        if doc is not None:
-            try:
-                doc.close()
-            except Exception:
-                pass
-
-    # OCR Fallback pipeline (rule A5)
-    from pdf2image import convert_from_path
-    import pytesseract
-
-    pages = convert_from_path(file_path, dpi=200)
-    page_texts = []
-    for page_img in pages:
-        page_texts.append(pytesseract.image_to_string(page_img))
-
-    return '\n'.join(page_texts), len(pages)
-
-
-# ── DOCX extraction (E2) ──────────────────────────────────────────────────────
-
-def _extract_docx(file_path: str) -> tuple[str, int]:
-    """
-    python-docx extraction. Preserves paragraph order and heading styles (E1).
-    Returns (raw_text, 1).
-    """
-    from docx import Document
-
-    doc = Document(file_path)
-    lines = []
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            lines.append('')
-            continue
-        # Preserve heading style as prefix so chunker can use it
-        if para.style.name.startswith('Heading'):
-            lines.append(text)  # headings already have their number in text
-        else:
-            lines.append(text)
-
-    return '\n'.join(lines), 1
-
-
-# ── public interface (E2) ─────────────────────────────────────────────────────
-
-_EXTRACTION_CACHE = {}
 
 def _file_digest(path: Path) -> str:
     hasher = hashlib.sha256()
@@ -194,41 +50,179 @@ def _file_digest(path: Path) -> str:
             hasher.update(chunk)
     return hasher.hexdigest()
 
+
+# ── Page marker helpers ───────────────────────────────────────────────────────
+
+def _embed_page_markers(documents) -> tuple[str, list[dict]]:
+    """
+    Takes a list of LlamaParse Document objects (one per page).
+    Returns (full_markdown_with_markers, page_texts).
+
+    Page markers look like:  <!-- PAGE 2 -->
+    Gemini reads them to determine which page each clause is on.
+    """
+    full_parts = []
+    page_texts = []
+    char_offset = 0
+
+    for i, doc in enumerate(documents):
+        page_num  = i + 1
+        marker    = f"\n\n<!-- PAGE {page_num} -->\n\n"
+        page_text = (doc.text or "").strip()
+
+        full_parts.append(marker + page_text)
+
+        page_texts.append({
+            "page":       page_num,
+            "text":       page_text,
+            "char_start": char_offset + len(marker),
+            "char_end":   char_offset + len(marker) + len(page_text),
+        })
+        char_offset += len(marker) + len(page_text)
+
+    return "".join(full_parts).strip(), page_texts
+
+
+# ── Primary: LlamaParse ───────────────────────────────────────────────────────
+
+def _extract_llamaparse(file_path: str) -> tuple[str, list[dict], int]:
+    """
+    Calls LlamaParse cloud API.
+    Returns (markdown_with_page_markers, page_texts, page_count).
+    Raises if LLAMA_CLOUD_API_KEY is missing or call fails.
+    """
+    from llama_parse import LlamaParse
+
+    api_key = os.getenv("LLAMA_CLOUD_API_KEY")
+    if not api_key:
+        raise EnvironmentError("LLAMA_CLOUD_API_KEY not set")
+
+    parser = LlamaParse(
+        api_key=api_key,
+        result_type="markdown",   # structured markdown preserving tables, headings
+        verbose=False,
+        language="en",
+        # Parse each page separately so we get a Document per page
+        split_by_page=True,
+    )
+
+    documents = parser.load_data(file_path)
+
+    if not documents:
+        raise ValueError("LlamaParse returned no content")
+
+    full_markdown, page_texts = _embed_page_markers(documents)
+    return full_markdown, page_texts, len(documents)
+
+
+# ── Fallback: PyMuPDF ─────────────────────────────────────────────────────────
+
+def _extract_fallback(file_path: str) -> tuple[str, list[dict], int]:
+    """
+    Plain-text fallback using PyMuPDF (PDF) or python-docx (DOCX).
+    Embeds page markers in the same format so downstream is unchanged.
+    """
+    ext = Path(file_path).suffix.lower()
+
+    if ext == '.pdf':
+        import fitz
+        doc        = fitz.open(file_path)
+        page_count = len(doc)
+        documents  = []
+
+        class _FakePage:
+            def __init__(self, text): self.text = text
+
+        for page in doc:
+            documents.append(_FakePage(page.get_text()))
+        doc.close()
+
+    elif ext in ('.docx', '.doc'):
+        from docx import Document
+        doc   = Document(file_path)
+        lines = [p.text.strip() for p in doc.paragraphs]
+        documents = [type('P', (), {'text': '\n'.join(lines)})()]
+        page_count = 1
+    else:
+        raise ValueError(f"Unsupported file type: {ext}")
+
+    full_text, page_texts = _embed_page_markers(documents)
+    return full_text, page_texts, page_count
+
+
+# ── Noise stripping (kept for fallback path) ──────────────────────────────────
+
+_NOISE_PATTERNS = [
+    re.compile(r'^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s+(AM|PM)\s*.*$', re.MULTILINE),
+    re.compile(r'^https?://.+$', re.MULTILINE),
+    re.compile(r'^Page\s+\d+\s+of\s+\d+\s*$', re.MULTILINE | re.IGNORECASE),
+    re.compile(r'^\d+/\d+\s*$', re.MULTILINE),
+]
+
+def _strip_noise(text: str) -> str:
+    for pattern in _NOISE_PATTERNS:
+        text = pattern.sub('', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+# ── Public interface ──────────────────────────────────────────────────────────
+
 def extract(file_path: str) -> ExtractionResult:
     """
-    Single entry point for all file types.
-    Dispatches to PyMuPDF/OCR pipeline for PDF, python-docx for DOCX.
-    Uses in-memory caching to guarantee high performance on repeated runs.
-    Always strips page noise (E3) before returning.
+    Single entry point. Tries LlamaParse first, falls back to PyMuPDF/docx.
+    Caches by file digest so repeated calls in the same process are instant.
     """
     path = Path(file_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    size = path.stat().st_size
-    ext = path.suffix.lower()
-    cache_key = (ext, size, _file_digest(path))
+    ext       = path.suffix.lower()
+    cache_key = (ext, path.stat().st_size, _file_digest(path))
     if cache_key in _EXTRACTION_CACHE:
         return _EXTRACTION_CACHE[cache_key]
 
-    if ext == '.pdf':
-        raw_text, pages = _extract_pdf(str(path))
-        file_type = 'pdf'
-    elif ext in ('.docx', '.doc'):
-        raw_text, pages = _extract_docx(str(path))
-        file_type = 'docx'
-    else:
-        raise ValueError(f"Unsupported file type: {ext}. Supported: .pdf, .docx")
+    # ── Try LlamaParse ────────────────────────────────────────────────────────
+    used_llamaparse = True
+    try:
+        full_text, page_texts, pages = _extract_llamaparse(str(path))
+    except Exception as llama_err:
+        used_llamaparse = False
+        try:
+            full_text, page_texts, pages = _extract_fallback(str(path))
+            full_text = _strip_noise(full_text)
+        except Exception as fallback_err:
+            raise RuntimeError(
+                f"Both extractors failed.\n"
+                f"  LlamaParse: {llama_err}\n"
+                f"  Fallback:   {fallback_err}"
+            )
 
-    clean_text = _strip_noise(raw_text)       # E3
-    headings   = _extract_headings(clean_text) # E1
+    file_type = 'pdf' if ext == '.pdf' else 'docx'
 
     result = ExtractionResult(
-        text=clean_text,
-        headings=headings,
+        text=full_text,
+        markdown=full_text,
+        headings=[],          # Gemini chunker reads markdown directly
         file_type=file_type,
         pages=pages,
+        page_texts=page_texts,
     )
 
     _EXTRACTION_CACHE[cache_key] = result
     return result
+
+
+# ── Page lookup utility (used by chunker) ─────────────────────────────────────
+
+def page_for_offset(char_offset: int, page_texts: list[dict]) -> int | None:
+    """
+    Given a character offset in the full markdown, returns the page number.
+    Used by the Gemini chunker as a cross-check when LlamaParse page markers
+    are ambiguous.
+    """
+    for pt in page_texts:
+        if pt["char_start"] <= char_offset < pt["char_end"]:
+            return pt["page"]
+    return None
