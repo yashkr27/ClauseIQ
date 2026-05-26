@@ -1,44 +1,63 @@
 """
-Layer 1 — Extraction (v2)
-Rules satisfied: A2, A5, E1, E2, E3
+Layer 1 — Extraction (v3)
 
 Public interface:
     extract(file_path: str) -> ExtractionResult
 
-ExtractionResult:
-    text       : str         # full markdown (page markers embedded)
-    markdown   : str         # alias for text
-    headings   : list[dict]  # kept for backward compat — now empty (Gemini chunks instead)
-    file_type  : str         # "pdf" | "docx"
-    pages      : int         # page count from LlamaParse
-    page_texts : list[dict]  # [{"page": 1, "text": "...", "char_start": N, "char_end": M}]
-
 Pipeline:
-    LlamaParse (primary) → structured markdown per page → page markers embedded
-    PyMuPDF   (fallback) → plain text if LlamaParse unavailable
+    LlamaParse (primary)  → structured markdown + page markers
+    PyMuPDF / docx (fallback) → plain text when LlamaParse unavailable/empty
+
+Backends live in:
+    extraction/llamaparse_backend.py  — LlamaParse cloud API
+    extraction/fallback_backend.py    — PyMuPDF / python-docx
+
+Logging:
+    Configure via standard logging.  At INFO level you see which backend
+    ran and how much content was extracted.  At DEBUG level you see
+    per-page previews.  Fallback reasons are always logged at WARNING.
 """
 
-import os
-import re
 import hashlib
+import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .llamaparse_backend import extract_llamaparse
+from .fallback_backend import extract_fallback
 
-# ── Output type ───────────────────────────────────────────────────────────────
+# ── Logging setup ─────────────────────────────────────────────────────────────
+# Configure the root 'src.extraction' logger from the LOG_LEVEL env var.
+# Uvicorn's own logging propagates to root, so this shows in the server console.
+
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=getattr(logging, _log_level, logging.INFO),
+)
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OUTPUT TYPE
+# ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class ExtractionResult:
     text:       str              # full text with <!-- PAGE N --> markers
     markdown:   str              # same as text (alias for Gemini chunker)
-    headings:   list             # kept for backward compat — now always []
-    file_type:  str
+    headings:   list             # kept for backward compat — always []
+    file_type:  str              # "pdf" | "docx"
     pages:      int
     page_texts: list = field(default_factory=list)
-    # [{"page": int, "text": str, "char_start": int, "char_end": int}]
+    # page_texts: [{"page": int, "text": str, "char_start": int, "char_end": int}]
+    extracted_by: str = "unknown"   # "llamaparse" | "fallback" — useful for debugging
 
 
-# ── In-memory cache ───────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# IN-MEMORY CACHE
+# ──────────────────────────────────────────────────────────────────────────────
 
 _EXTRACTION_CACHE: dict = {}
 
@@ -51,128 +70,20 @@ def _file_digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-# ── Page marker helpers ───────────────────────────────────────────────────────
-
-def _embed_page_markers(documents) -> tuple[str, list[dict]]:
-    """
-    Takes a list of LlamaParse Document objects (one per page).
-    Returns (full_markdown_with_markers, page_texts).
-
-    Page markers look like:  <!-- PAGE 2 -->
-    Gemini reads them to determine which page each clause is on.
-    """
-    full_parts = []
-    page_texts = []
-    char_offset = 0
-
-    for i, doc in enumerate(documents):
-        page_num  = i + 1
-        marker    = f"\n\n<!-- PAGE {page_num} -->\n\n"
-        page_text = (doc.text or "").strip()
-
-        full_parts.append(marker + page_text)
-
-        page_texts.append({
-            "page":       page_num,
-            "text":       page_text,
-            "char_start": char_offset + len(marker),
-            "char_end":   char_offset + len(marker) + len(page_text),
-        })
-        char_offset += len(marker) + len(page_text)
-
-    return "".join(full_parts).strip(), page_texts
-
-
-# ── Primary: LlamaParse ───────────────────────────────────────────────────────
-
-def _extract_llamaparse(file_path: str) -> tuple[str, list[dict], int]:
-    """
-    Calls LlamaParse cloud API.
-    Returns (markdown_with_page_markers, page_texts, page_count).
-    Raises if LLAMA_CLOUD_API_KEY is missing or call fails.
-    """
-    from llama_parse import LlamaParse
-
-    api_key = os.getenv("LLAMA_CLOUD_API_KEY")
-    if not api_key:
-        raise EnvironmentError("LLAMA_CLOUD_API_KEY not set")
-
-    parser = LlamaParse(
-        api_key=api_key,
-        result_type="markdown",   # structured markdown preserving tables, headings
-        verbose=False,
-        language="en",
-        # Parse each page separately so we get a Document per page
-        split_by_page=True,
-    )
-
-    documents = parser.load_data(file_path)
-
-    if not documents:
-        raise ValueError("LlamaParse returned no content")
-
-    full_markdown, page_texts = _embed_page_markers(documents)
-    return full_markdown, page_texts, len(documents)
-
-
-# ── Fallback: PyMuPDF ─────────────────────────────────────────────────────────
-
-def _extract_fallback(file_path: str) -> tuple[str, list[dict], int]:
-    """
-    Plain-text fallback using PyMuPDF (PDF) or python-docx (DOCX).
-    Embeds page markers in the same format so downstream is unchanged.
-    """
-    ext = Path(file_path).suffix.lower()
-
-    if ext == '.pdf':
-        import fitz
-        doc        = fitz.open(file_path)
-        page_count = len(doc)
-        documents  = []
-
-        class _FakePage:
-            def __init__(self, text): self.text = text
-
-        for page in doc:
-            documents.append(_FakePage(page.get_text()))
-        doc.close()
-
-    elif ext in ('.docx', '.doc'):
-        from docx import Document
-        doc   = Document(file_path)
-        lines = [p.text.strip() for p in doc.paragraphs]
-        documents = [type('P', (), {'text': '\n'.join(lines)})()]
-        page_count = 1
-    else:
-        raise ValueError(f"Unsupported file type: {ext}")
-
-    full_text, page_texts = _embed_page_markers(documents)
-    return full_text, page_texts, page_count
-
-
-# ── Noise stripping (kept for fallback path) ──────────────────────────────────
-
-_NOISE_PATTERNS = [
-    re.compile(r'^\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}\s+(AM|PM)\s*.*$', re.MULTILINE),
-    re.compile(r'^https?://.+$', re.MULTILINE),
-    re.compile(r'^Page\s+\d+\s+of\s+\d+\s*$', re.MULTILINE | re.IGNORECASE),
-    re.compile(r'^\d+/\d+\s*$', re.MULTILINE),
-]
-
-def _strip_noise(text: str) -> str:
-    for pattern in _NOISE_PATTERNS:
-        text = pattern.sub('', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
-
-# ── Public interface ──────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# PUBLIC INTERFACE
+# ──────────────────────────────────────────────────────────────────────────────
 
 def extract(file_path: str) -> ExtractionResult:
     """
-    Single entry point. Tries LlamaParse first, falls back to PyMuPDF/docx.
-    Caches by file digest so repeated calls in the same process are instant.
+    Single entry point.  Tries LlamaParse first, falls back to PyMuPDF/docx.
+    Caches by file content digest so repeated calls in the same process are instant.
+
+    Logs clearly at every decision point so you can see in the server console:
+      - Which backend was attempted
+      - Why LlamaParse failed (if it did)
+      - How much content was extracted
+      - Whether the fallback was used
     """
     path = Path(file_path).resolve()
     if not path.exists():
@@ -180,47 +91,87 @@ def extract(file_path: str) -> ExtractionResult:
 
     ext       = path.suffix.lower()
     cache_key = (ext, path.stat().st_size, _file_digest(path))
-    if cache_key in _EXTRACTION_CACHE:
-        return _EXTRACTION_CACHE[cache_key]
 
-    # ── Try LlamaParse ────────────────────────────────────────────────────────
-    used_llamaparse = True
+    if cache_key in _EXTRACTION_CACHE:
+        cached = _EXTRACTION_CACHE[cache_key]
+        logger.info(
+            "Cache hit for '%s' (extracted_by=%s, %d chars)",
+            path.name, cached.extracted_by, len(cached.text),
+        )
+        return cached
+
+    file_type    = 'pdf' if ext == '.pdf' else 'docx'
+    extracted_by = "unknown"
+
+    # ── Attempt 1: LlamaParse ─────────────────────────────────────────────────
+    full_text  = None
+    page_texts = None
+    pages      = None
+    llama_err  = None
+
     try:
-        full_text, page_texts, pages = _extract_llamaparse(str(path))
-    except Exception as llama_err:
-        used_llamaparse = False
+        logger.info("Extraction: trying LlamaParse for '%s'", path.name)
+        full_text, page_texts, pages = extract_llamaparse(str(path))
+        extracted_by = "llamaparse"
+        logger.info(
+            "Extraction: LlamaParse succeeded — %d pages, %d chars",
+            pages, len(full_text),
+        )
+    except Exception as exc:
+        llama_err = exc
+        logger.warning(
+            "Extraction: LlamaParse FAILED for '%s' — reason: %s. "
+            "Falling back to PyMuPDF/docx.",
+            path.name, exc,
+        )
+
+    # ── Attempt 2: Fallback ───────────────────────────────────────────────────
+    if full_text is None:
         try:
-            full_text, page_texts, pages = _extract_fallback(str(path))
-            full_text = _strip_noise(full_text)
+            logger.info("Extraction: trying fallback (PyMuPDF/docx) for '%s'", path.name)
+            full_text, page_texts, pages = extract_fallback(str(path))
+            extracted_by = "fallback"
+            logger.info(
+                "Extraction: fallback succeeded — %d pages, %d chars",
+                pages, len(full_text),
+            )
         except Exception as fallback_err:
             raise RuntimeError(
-                f"Both extractors failed.\n"
-                f"  LlamaParse: {llama_err}\n"
-                f"  Fallback:   {fallback_err}"
-            )
+                f"Both extractors failed for '{path.name}'.\n"
+                f"  LlamaParse : {llama_err}\n"
+                f"  Fallback   : {fallback_err}"
+            ) from fallback_err
 
-    file_type = 'pdf' if ext == '.pdf' else 'docx'
+    # ── Warn if content is suspiciously thin ─────────────────────────────────
+    actual_content = len(full_text.replace("<!-- PAGE", "").replace("-->", "").strip())
+    if actual_content < 200:
+        logger.warning(
+            "Extraction: result for '%s' is very thin (%d content chars, backend=%s). "
+            "The document may be image-only or the extraction failed silently.",
+            path.name, actual_content, extracted_by,
+        )
 
     result = ExtractionResult(
         text=full_text,
         markdown=full_text,
-        headings=[],          # Gemini chunker reads markdown directly
+        headings=[],
         file_type=file_type,
         pages=pages,
         page_texts=page_texts,
+        extracted_by=extracted_by,
     )
 
     _EXTRACTION_CACHE[cache_key] = result
     return result
 
 
-# ── Page lookup utility (used by chunker) ─────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# PAGE LOOKUP UTILITY  (used by chunker)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def page_for_offset(char_offset: int, page_texts: list[dict]) -> int | None:
     """
     Given a character offset in the full markdown, returns the page number.
-    Used by the Gemini chunker as a cross-check when LlamaParse page markers
-    are ambiguous.
     """
     for pt in page_texts:
         if pt["char_start"] <= char_offset < pt["char_end"]:
