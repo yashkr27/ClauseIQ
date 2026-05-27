@@ -1,4 +1,4 @@
-# ClauseIQ — AI-Powered Contract Intelligence
+#Brahmo Document Intelligence Project → ClauseIQ
 
 ClauseIQ is a legal document intelligence system that extracts, scores, and compares contract clauses. Upload a single contract to get a clause-by-clause risk heatmap, or upload two versions of the same contract to get a side-by-side comparison with word-level diffs and a net risk delta.
 
