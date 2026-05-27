@@ -51,3 +51,5 @@ if os.path.isdir(_frontend_dir):
         return FileResponse(os.path.join(_frontend_dir, 'index.html'))
 
     app.mount("/", StaticFiles(directory=_frontend_dir), name="frontend")
+
+    #python -m uvicorn src.api.main:app --reload --port 8000
